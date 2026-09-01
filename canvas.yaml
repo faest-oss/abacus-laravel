@@ -1,0 +1,27 @@
+preset: package
+
+namespace: Faest\Abacus
+user-auth-model: Workbench\App\Models\User
+
+paths:
+  src: src
+  resource: resources
+
+factory:
+  path: database/factories
+
+migration:
+  path: database/migrations
+  prefix: ''
+
+console:
+  namespace: Faest\Abacus\Console\Commands
+
+model:
+  namespace: Faest\Abacus\Models
+
+provider:
+  namespace: Faest\Abacus
+
+testing:
+  namespace: Faest\Abacus\Tests
