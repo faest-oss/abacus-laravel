@@ -10,6 +10,7 @@ use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\Transaction;
+use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Models\LedgerTransaction;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -96,15 +97,12 @@ abstract class AbstractLedger
         return $aggregate;
     }
 
-    public function post(
-        string $ledgerId,
-        LedgerPayload $payload,
-        string $reason,
-        CarbonImmutable $effectiveAt,
-    ): Transaction {
+    public function post(TransactionDraft $draft): Transaction
+    {
         $this->setupLockRecords([$ledgerId]);
 
-        return DB::connection()->transaction(fn () => $this->performPost($ledgerId, $payload, $reason, $effectiveAt));
+        return DB::connection()->transaction(fn () => $this->performPost(
+            $ledgerId, $payload, $reason, $effectiveAt));
     }
 
     /**
@@ -113,7 +111,7 @@ abstract class AbstractLedger
     private function setupLockRecords(array $ledgerIds): void
     {
         foreach ($ledgerIds as $id) {
-            DB::connection()->table('ledger_transaction_type_id')->upsert([
+            DB::connection()->table('ledger_stream_head')->upsert([
                 'ledger_type' => $this->getLedgerType(),
                 'ledger_id' => $id,
             ], ['ledger_type', 'ledger_id']);
@@ -127,7 +125,7 @@ abstract class AbstractLedger
     {
         sort($ledgerIds);
         foreach ($ledgerIds as $id) {
-            DB::connection()->table('ledger_transaction_type_id')
+            DB::connection()->table('ledger_stream_head')
                 ->where('ledger_type', $this->getLedgerType())
                 ->where('ledger_id', $id)
                 ->lockForUpdate()
@@ -136,10 +134,7 @@ abstract class AbstractLedger
     }
 
     private function performPost(
-        string $ledgerId,
-        LedgerPayload $payload,
-        string $reason,
-        CarbonImmutable $effectiveAt,
+        TransactionDraft $draft,
         ?string $reversesId = null,
         ?string $adjustsId = null,
         ?string $correlationId = null,
@@ -148,7 +143,7 @@ abstract class AbstractLedger
             throw new LogicException('Ledger operations must run within a db transaction');
         }
 
-        $this->lockLedgers([$ledgerId]);
+        $this->lockLedgers([$draft->ledgerId]);
 
         if ($reversesId) {
             $existingReversal = LedgerTransaction::query()
@@ -172,14 +167,14 @@ abstract class AbstractLedger
 
         /* @var Collection<int, LedgerTransaction> $history */
         $history = LedgerTransaction::query()->where('ledger_type', $this->getLedgerType())
-            ->where('ledger_id', $ledgerId)
+            ->where('ledger_id', $draft->ledgerId)
             ->orderBy('id', 'asc')
             ->get();
 
-        $aggregate = $this->getAggregate($ledgerId);
-        $this->assertInvariants($payload, $aggregate);
+        $aggregate = $this->getAggregate($draft->ledgerId);
+        $this->assertInvariants($draft->payload, $aggregate);
 
-        $authId = Auth::id();
+        $authId = $draft->userId ? $draft->userId : Auth::id();
 
         if (! $authId) {
             throw new Exception('Ledgers updates must be made by authenticated actors');
@@ -191,12 +186,12 @@ abstract class AbstractLedger
         $newEntry->reverses_transaction_id = $reversesId;
         $newEntry->adjusts_transaction_id = $adjustsId;
         $newEntry->correlation_id = $correlationId;
-        $newEntry->payload_type = $this->getPayloadType($payload);
+        $newEntry->payload_type = $this->getPayloadType($draft->payload);
         $newEntry->ledger_type = $this->getLedgerType();
-        $newEntry->ledger_id = $ledgerId;
-        $newEntry->effective_at = $effectiveAt;
-        $newEntry->payload = $payload->jsonSerialize();
-        $newEntry->reason = $reason;
+        $newEntry->ledger_id = $draft->ledgerId;
+        $newEntry->effective_at = $draft->eventDate->toImmutable();
+        $newEntry->payload = $draft->payload->jsonSerialize();
+        $newEntry->reason = $draft->reason;
         $newEntry->save();
 
         return $this->toDto($newEntry);

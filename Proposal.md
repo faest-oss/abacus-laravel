@@ -10,10 +10,14 @@ The key value add of a ledger is the ability to audit and understand how the pre
 ### Auditing
 
 The following fields must be associated with every entry in a ledger:
-- Effective date: The canonical event associated with this event - determined by the *domain*
+- Event date: When did this event actually happen - provided by the *domain*
+- Accounting date: When does this event count *financially* - also provided by the domain. The period closing rules vary by domain and this cannot be determined in the toolkit.
 - Recorded at: The date the event was recorded into the ledger - determined by the *toolkit* - this must not be modified by the domain, otherwise the ledger risks becoming corrupted.
 - entered_by_user_id: An identifier for the user that effectuated this entry. The system must be able to answer *who* did caused a change.
 - reason: A text field capturing why this event is being recorded.
+- reversal of - if a transaction represents the reversal/void of a former - it should record what transaction it is reversing.
+- adjustment of - if a transaction represents the adjustment of a former - it should likewise records its target.
+- correlation id - if a single logical event requires multiple transactions, they are tied together using a correlation id. For example a transfer from one ledger to another requires at least two transactions - because a transaction is always tied to a single ledger id, a transfer must be represented as two transactions, one for the source ledger and one for the destination ledger.
 
 The above fields will enable the system to answer WHO, WHEN and WHY. Using two date fields allows WHEN to be answered along the *domain* timeline or the *system* timeline. The rest of the event will answer the WHAT.
 
@@ -39,8 +43,9 @@ I want to encourage the use of ledgers whenever they are the right tool for the 
 | ledger_type | string | The polymorphic morph column (ex: App\Domains\Payroll\Pension\Ledgers\ServiceYearLedger) |
 | ledger_id | string/int | Polymorphic id (ex: pension plan id or account id) - defines which transactions are grouped together |
 | payload | json | The "WHAT" provided by the domain |
-| effective_date | timestamp | The domain timeline - when did this event happen |
-| recorded_at | timestamp | The system timeline. Ideally chosen automatically by the db engine at insert time |
+| event_date | timestamp | The operational domain timeline - when did this event actually happen |
+| accounting_date | timestamp | The accounting timeline - when does the event count for |
+| recorded_at | timestamp | The system timeline - when did the system receive this event. Ideally chosen automatically by the db engine at insert time |
 | entered_by_user_id | unsigned big int | string | The "WHO" |
 | reason | string/text | The "WHY" (ex: "Billing route 56 cycle 2026-03" or "Award 1 service year on anniversary") |
 
@@ -107,4 +112,100 @@ Route::ledger('utilities/{account}', UtilityBillingLedger::class)
 // POST /utilities/{account}/adjust
 ```
 
+
+### Multi ledger orchestration
+
+
+```php
+class LedgerOrchestrator
+{
+    /**
+     * @param AbstractLedger[] $ledgers
+     */
+    public static function bundle(array $ledgers, Closure $actions)
+    {
+        return DB::transaction(function () use ($ledgers, $actions) {
+            $correlationId = (string) Str::uuid();
+
+            // 1. Sort globally to prevent cross-table/cross-row deadlocks
+            usort($ledgers, function ($a, $b) {
+                if ($a->ledgerType === $b->ledgerType) {
+                    return strcmp((string)$a->ledgerId, (string)$b->ledgerId);
+                }
+                return strcmp($a->ledgerType, $b->ledgerType);
+            });
+
+            // 2. Lock all involved histories
+            foreach ($ledgers as $ledger) {
+                LedgerTransaction::where('ledger_type', $ledger->ledgerType)
+                    ->where('ledger_id', $ledger->ledgerId)
+                    ->lockForUpdate()
+                    ->get();
+            }
+
+            // 3. Execute the user's closure, passing the shared correlation ID
+            return $actions($correlationId);
+        });
+    }
+}
+```
+```
+
+```php
+class WalkInPaymentService
+{
+    public function receivePayment(string $drawerId, string $arAccountId, float $amount, int $userId): void
+    {
+        $drawer = new CashDrawerLedger($drawerId);
+        $ar = new AccountsReceivableLedger($arAccountId);
+
+        LedgerOrchestrator::bundle([$drawer, $ar], function (string $correlationId) use (...) {
+            
+            // Leg 1: Cash increases in the physical drawer
+            $drawer->post(
+                payload: new CashReceipt($amount),
+                effectiveDate: now(),
+                reason: "Walk-in payment for AR Acct $arAccountId",
+                userId: $userId,
+                correlationId: $correlationId
+            );
+
+            // Leg 2: The AR balance decreases
+            $ar->post(
+                payload: new ArCredit($amount), 
+                effectiveDate: now(),
+                reason: "Paid via Cash Drawer $drawerId",
+                userId: $userId,
+                correlationId: $correlationId
+            );
+
+        });
+    }
+}
+```
+
+
+```php
+
+// Contract
+interface PeriodManager
+{
+    /**
+     * Toolkit Requirement: Throws if the exact date is closed.
+     */
+    public function assertDateIsOpen(CarbonInterface $date, string $ledgerType): void;
+
+    /**
+     * Domain Helper: Calculates the correct open accounting date based on an event.
+     */
+    public function resolveAccountingDate(CarbonInterface $eventDate, string $ledgerType): CarbonInterface;
+}
+
+```
+
+The abstract ledger implementations can resolve the PeriodManager provided by the domain and reject posting into a closed period.
+
+```php
+app(PeriodManager::class)->assertDateIsOpen($accountingDate, $this->ledgerType);
+```
 

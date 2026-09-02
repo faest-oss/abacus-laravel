@@ -15,6 +15,7 @@ return new class extends Migration
             $table->ulid('id')->primary();
             $table->string('ledger_type');
             $table->string('ledger_id');
+            $table->unsignedBigInteger('stream_version');
             $table->string('payload_type');
             $table->json('payload');
             $table->string('reason');
@@ -24,18 +25,21 @@ return new class extends Migration
             $table->timestamp('effective_at');
             $table->timestamp('recorded_at');
             $table->string('entered_by_user_id');
+
+            $this->unique(['ledger_type', 'ledger_id', 'stream_version']);
         });
 
-        Schema::create('ledger_transaction_type_id', function (Blueprint $table) {
+        Schema::create('ledger_stream_head', function (Blueprint $table) {
             $table->string('ledger_type');
             $table->string('ledger_id');
-            $table->unique(['ledger_type', 'ledger_id']);
+            $table->unsignedBigInteger('version')->default(0);
+            $table->primary(['ledger_type', 'ledger_id']);
         });
     }
 
     public function down(): void
     {
         Schema::dropIfExists('ledger_transaction');
-        Schema::dropIfExists('ledger_transaction_type_id');
+        Schema::dropIfExists('ledger_stream_head');
     }
 };
