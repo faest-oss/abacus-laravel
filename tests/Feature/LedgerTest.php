@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
+use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
 use Workbench\App\Models\User;
 
@@ -15,11 +16,10 @@ it('posts transactions', function () {
 
     $this->actingAs(fakeUser());
 
-    $ledger->post([
+    $ledger->post(GenericPayload::make('deposit', [
         'amount' => 1,
-        'type' => 'deposit',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
     $this->assertDatabaseCount('ledger_transaction', 1);
 
@@ -45,17 +45,15 @@ it('enforces domain invariants', function () {
 
     $this->actingAs(fakeUser());
 
-    $ledger->post([
+    $ledger->post(GenericPayload::make('deposit', [
         'amount' => 1,
-        'type' => 'deposit',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
-    $overdraft = fn () => $ledger->post([
+    $overdraft = fn () => $ledger->post(GenericPayload::make('withdraw', [
         'amount' => -2,
-        'type' => 'withdraw',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
 
     expect($overdraft)
         ->toThrow(Exception::class, 'Cannot be negative');
@@ -80,23 +78,20 @@ it('calculates aggregates', function () {
 
     $this->actingAs(fakeUser());
 
-    $ledger->post([
+    $ledger->post(GenericPayload::make('deposit', [
         'amount' => 1,
-        'type' => 'deposit',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
-    $ledger->post([
+    $ledger->post(GenericPayload::make('deposit', [
         'amount' => 5,
-        'type' => 'deposit',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
 
-    $ledger->post([
+    $ledger->post(GenericPayload::make('withdraw', [
         'amount' => -4,
-        'type' => 'withdraw',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
 
     $this->assertEquals(['total' => 2], $ledger->getAggregate('123'));
 });
@@ -108,11 +103,11 @@ it('voids transactions', function () {
     $this->travelTo($time);
     $this->actingAs(fakeUser());
 
-    $transaction = $ledger->post([
+    $transaction = $ledger->post(GenericPayload::make('deposit', [
         'amount' => 1,
         'type' => 'deposit',
         'account_id' => '123',
-    ], 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
     $this->travel('1 day');
 

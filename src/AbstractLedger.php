@@ -6,6 +6,8 @@ namespace Faest\Abacus;
 
 use Carbon\CarbonImmutable;
 use Exception;
+use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Models\LedgerTransaction;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -28,47 +30,34 @@ abstract class AbstractLedger
     abstract public function initializeAggregate(): array|JsonSerializable;
 
     /**
-     * @param  array<mixed>|JsonSerializable  $entry
      * @param  array<mixed>|JsonSerializable  $existingAggregate
      * @return array<mixed>|JsonSerializable
      */
     abstract public function applyToAggregate(
-        array|JsonSerializable $entry,
+        LedgerPayload $ledgerPayload,
         array|JsonSerializable $existingAggregate,
     ): array|JsonSerializable;
 
     /**
-     * @param  array<mixed>|JsonSerializable  $entry
      * @param  array<mixed>|JsonSerializable  $aggregate
      */
-    abstract public function assertInvariants(array|JsonSerializable $entry, array|JsonSerializable $aggregate): void;
+    abstract public function assertInvariants(LedgerPayload $ledgerPayload, array|JsonSerializable $aggregate): void;
 
     abstract public function getLedgerType(): string;
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $payload
-     */
-    abstract public function getLedgerId(array|JsonSerializable $payload): string;
+    abstract public function getLedgerId(LedgerPayload $payload): string;
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $payload
-     */
-    abstract public function getPayloadType(array|JsonSerializable $payload): string;
+    abstract public function getPayloadType(LedgerPayload $payload): string;
 
     /**
      * @param  array<mixed>  $payload
-     * @return array<mixed>|JsonSerializable
      */
-    public function deserialize(string $eventType, array $payload): array|JsonSerializable
+    public function deserialize(string $eventType, array $payload): LedgerPayload
     {
-        return $payload;
+        return GenericPayload::make($eventType, $payload);
     }
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $entry
-     * @return array<mixed>|JsonSerializable
-     */
-    abstract public function computeOpposing(array|JsonSerializable $entry): array|JsonSerializable;
+    abstract public function computeOpposing(LedgerPayload $payload): LedgerPayload;
 
     /**
      * @param  array<mixed>  $desired
@@ -92,28 +81,25 @@ abstract class AbstractLedger
 
         foreach ($history as $historyEntry) {
             /** @var LedgerTransaction $historyEntry */
-            $aggregate = $this->applyToAggregate($historyEntry->payload, $aggregate);
+            $aggregate = $this->applyToAggregate($this->deserialize(
+                $historyEntry->payload_type,
+                $historyEntry->payload,
+            ), $aggregate);
         }
 
         return $aggregate;
     }
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $record
-     */
     public function post(
-        array|JsonSerializable $record,
+        LedgerPayload $payload,
         string $reason,
         CarbonImmutable $effectiveAt,
     ): LedgerTransaction {
-        return DB::connection()->transaction(fn () => $this->performPost($record, $reason, $effectiveAt));
+        return DB::connection()->transaction(fn () => $this->performPost($payload, $reason, $effectiveAt));
     }
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $record
-     */
     private function performPost(
-        array|JsonSerializable $record,
+        LedgerPayload $payload,
         string $reason,
         CarbonImmutable $effectiveAt,
         ?string $reversesId = null,
@@ -121,7 +107,7 @@ abstract class AbstractLedger
     ): LedgerTransaction {
         DB::connection()->table('ledger_transaction_type_id')->upsert([
             'ledger_type' => $this->getLedgerType(),
-            'ledger_id' => $this->getLedgerId($record),
+            'ledger_id' => $this->getLedgerId($payload),
         ], ['ledger_type', 'ledger_id']);
 
         if (DB::transactionLevel() === 0) {
@@ -130,7 +116,7 @@ abstract class AbstractLedger
 
         DB::connection()->table('ledger_transaction_type_id')
             ->where('ledger_type', $this->getLedgerType())
-            ->where('ledger_id', $this->getLedgerId($record))
+            ->where('ledger_id', $this->getLedgerId($payload))
             ->lockForUpdate()
             ->get();
 
@@ -156,18 +142,12 @@ abstract class AbstractLedger
 
         /* @var Collection<int, LedgerTransaction> $history */
         $history = LedgerTransaction::query()->where('ledger_type', $this->getLedgerType())
-            ->where('ledger_id', $this->getLedgerId($record))
+            ->where('ledger_id', $this->getLedgerId($payload))
             ->orderBy('id', 'asc')
             ->get();
 
-        $aggregate = $this->initializeAggregate();
-
-        foreach ($history as $historyEntry) {
-            /** @var LedgerTransaction $historyEntry */
-            $aggregate = $this->applyToAggregate($historyEntry->payload, $aggregate);
-        }
-
-        $this->assertInvariants($record, $aggregate);
+        $aggregate = $this->getAggregate($this->getLedgerId($payload));
+        $this->assertInvariants($payload, $aggregate);
 
         $authId = Auth::id();
 
@@ -180,13 +160,11 @@ abstract class AbstractLedger
         $newEntry->recorded_at = now()->toImmutable();
         $newEntry->reverses_transaction_id = $reversesId;
         $newEntry->adjusts_transaction_id = $adjustsId;
-        $newEntry->payload_type = $this->getPayloadType($record);
+        $newEntry->payload_type = $this->getPayloadType($payload);
         $newEntry->ledger_type = $this->getLedgerType();
-        $newEntry->ledger_id = $this->getLedgerId($record);
+        $newEntry->ledger_id = $this->getLedgerId($payload);
         $newEntry->effective_at = $effectiveAt;
-        $newEntry->payload = $record instanceof JsonSerializable
-            ? $record->jsonSerialize()
-            : $record;
+        $newEntry->payload = $payload->jsonSerialize();
         $newEntry->reason = $reason;
         $newEntry->save();
 
@@ -198,7 +176,12 @@ abstract class AbstractLedger
         $transactionToReverse = LedgerTransaction::query()->findSole($id);
 
         return DB::connection()->transaction(fn () => $this->performPost(
-            $this->computeOpposing($this->deserialize($transactionToReverse->payload_type, $transactionToReverse->payload)),
+            $this->computeOpposing(
+                $this->deserialize(
+                    $transactionToReverse->payload_type,
+                    $transactionToReverse->payload,
+                ),
+            ),
             $reason,
             $effectiveAt ? $effectiveAt : $transactionToReverse->effective_at,
             reversesId: $id,

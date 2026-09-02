@@ -6,12 +6,14 @@ namespace Faest\Abacus\Tests\Fixtures;
 
 use Exception;
 use Faest\Abacus\AbstractLedger;
+use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Data\GenericPayload;
 use JsonSerializable;
 
 final class SimpleLedger extends AbstractLedger
 {
     /**
-     * @return array<mixed>
+     * @return array{total: int}
      */
     public function initializeAggregate(): array
     {
@@ -19,36 +21,34 @@ final class SimpleLedger extends AbstractLedger
     }
 
     /**
-     * @param  array<mixed>|JsonSerializable  $entry
      * @param  array<mixed>|JsonSerializable  $existingAggregate
      * @return array<mixed>
      */
     public function applyToAggregate(
-        array|JsonSerializable $entry,
+        LedgerPayload $payload,
         array|JsonSerializable $existingAggregate,
     ): array {
-        if (! is_array($entry) || ! is_array($existingAggregate)) {
+        if (! $payload instanceof GenericPayload || ! is_array($existingAggregate)) {
             throw new Exception('must be arrays');
         }
 
-        $existingAggregate['total'] += $entry['amount'];
+        $existingAggregate['total'] += $payload->payload()['amount'];
 
         return $existingAggregate;
     }
 
     /**
-     * @param  array<mixed>|JsonSerializable  $entry
      * @param  array<mixed>|JsonSerializable  $aggregate
      */
     public function assertInvariants(
-        array|JsonSerializable $entry,
+        LedgerPayload $payload,
         array|JsonSerializable $aggregate,
     ): void {
-        if (! is_array($entry) || ! is_array($aggregate)) {
+        if (! $payload instanceof GenericPayload || ! is_array($aggregate)) {
             throw new Exception('must be arrays');
         }
 
-        if ($aggregate['total'] + $entry['amount'] < 0) {
+        if ($aggregate['total'] + $payload->payload()['amount'] < 0) {
             throw new Exception('Cannot be negative');
         }
     }
@@ -63,30 +63,24 @@ final class SimpleLedger extends AbstractLedger
      */
     public function getLedgerId(array|JsonSerializable $payload): string
     {
-        assert(is_array($payload));
+        assert($payload instanceof GenericPayload);
 
-        return $payload['account_id'];
+        return $payload->payload()['account_id'];
     }
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $payload
-     */
-    public function getPayloadType(array|JsonSerializable $payload): string
+    public function getPayloadType(LedgerPayload $payload): string
     {
-        assert(is_array($payload));
+        assert($payload instanceof GenericPayload);
 
-        return $payload['type'];
+        return $payload->payloadType();
     }
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $entry
-     * @return array<mixed>
-     */
-    public function computeOpposing(array|JsonSerializable $entry): array
+    public function computeOpposing(LedgerPayload $payload): LedgerPayload
     {
-        assert(is_array($entry));
-        $entry['amount'] = -1 * $entry['amount'];
+        assert($payload instanceof GenericPayload);
+        $newPayload = $payload->payload();
+        $newPayload['amount'] = -1 * $newPayload['amount'];
 
-        return $entry;
+        return GenericPayload::make($payload->payloadType(), $newPayload);
     }
 }

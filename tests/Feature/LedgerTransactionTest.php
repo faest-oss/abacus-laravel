@@ -12,9 +12,11 @@ function createLedgerTransaction(): LedgerTransaction
     $transaction->ledger_type = 'utility-billing';
     $transaction->ledger_id = 'account-123';
     $transaction->payload = json_encode(['type' => 'charge', 'amount' => 1250], JSON_THROW_ON_ERROR);
+    $transaction->payload_type = 'charge';
     $transaction->effective_at = Carbon::parse('2026-01-15 09:30:00');
     $transaction->recorded_at = Carbon::parse('2026-01-15 10:00:00');
     $transaction->entered_by_user_id = 'user-456';
+    $transaction->reason = 'testing';
     $transaction->save();
 
     return $transaction;
