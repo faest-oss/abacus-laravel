@@ -16,9 +16,8 @@ it('posts transactions', function () {
 
     $this->actingAs(fakeUser());
 
-    $ledger->post(GenericPayload::make('deposit', [
+    $ledger->post('acct-123', GenericPayload::make('deposit', [
         'amount' => 1,
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
     $this->assertDatabaseCount('ledger_transaction', 1);
@@ -30,7 +29,7 @@ it('posts transactions', function () {
         'adjusts_transaction_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
-        'ledger_id' => '123',
+        'ledger_id' => 'acct-123',
         'effective_at' => '2026-06-01 00:00:00',
         'reason' => 'weekly deposit',
     ]);
@@ -45,14 +44,12 @@ it('enforces domain invariants', function () {
 
     $this->actingAs(fakeUser());
 
-    $ledger->post(GenericPayload::make('deposit', [
+    $ledger->post('acct-123', GenericPayload::make('deposit', [
         'amount' => 1,
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
-    $overdraft = fn () => $ledger->post(GenericPayload::make('withdraw', [
+    $overdraft = fn () => $ledger->post('acct-123', GenericPayload::make('withdraw', [
         'amount' => -2,
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
 
     expect($overdraft)
@@ -67,7 +64,7 @@ it('enforces domain invariants', function () {
         'adjusts_transaction_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
-        'ledger_id' => '123',
+        'ledger_id' => 'acct-123',
         'effective_at' => '2026-06-01 00:00:00',
         'reason' => 'weekly deposit',
     ]);
@@ -78,22 +75,19 @@ it('calculates aggregates', function () {
 
     $this->actingAs(fakeUser());
 
-    $ledger->post(GenericPayload::make('deposit', [
+    $ledger->post('acct-123', GenericPayload::make('deposit', [
         'amount' => 1,
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
-    $ledger->post(GenericPayload::make('deposit', [
+    $ledger->post('acct-123', GenericPayload::make('deposit', [
         'amount' => 5,
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
 
-    $ledger->post(GenericPayload::make('withdraw', [
+    $ledger->post('acct-123', GenericPayload::make('withdraw', [
         'amount' => -4,
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-02'));
 
-    $this->assertEquals(['total' => 2], $ledger->getAggregate('123'));
+    $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-123'));
 });
 
 it('voids transactions', function () {
@@ -103,17 +97,21 @@ it('voids transactions', function () {
     $this->travelTo($time);
     $this->actingAs(fakeUser());
 
-    $transaction = $ledger->post(GenericPayload::make('deposit', [
+    $ledger->post('acct-123', GenericPayload::make('deposit', [
+        'amount' => 2,
+        'type' => 'deposit',
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
+
+    $transaction = $ledger->post('acct-123', GenericPayload::make('deposit', [
         'amount' => 1,
         'type' => 'deposit',
-        'account_id' => '123',
     ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
 
     $this->travel('1 day');
 
     $ledger->void($transaction->id, 'check bounced');
 
-    $this->assertDatabaseCount('ledger_transaction', 2);
+    $this->assertDatabaseCount('ledger_transaction', 3);
 
     $this->assertDatabaseHas('ledger_transaction', [
         'entered_by_user_id' => '89',
@@ -122,7 +120,7 @@ it('voids transactions', function () {
         'adjusts_transaction_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
-        'ledger_id' => '123',
+        'ledger_id' => 'acct-123',
         'effective_at' => '2026-06-01 00:00:00',
         'reason' => 'weekly deposit',
     ]);
@@ -134,12 +132,73 @@ it('voids transactions', function () {
         'adjusts_transaction_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
-        'ledger_id' => '123',
+        'ledger_id' => 'acct-123',
         'effective_at' => '2026-06-01 00:00:00',
         'reason' => 'check bounced',
     ]);
 
-    $this->assertEquals(['total' => 0], $ledger->getAggregate('123'));
+    $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-123'));
+});
+
+it('transfers between ledger ids', function () {
+    $ledger = new SimpleLedger;
+
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+    $this->actingAs(fakeUser());
+
+    $transaction = $ledger->post('acct-123', GenericPayload::make('deposit', [
+        'amount' => 5,
+        'type' => 'deposit',
+    ]), 'weekly deposit', CarbonImmutable::parse('2026-06-01'));
+
+    $sourceTransfer = GenericPayload::make('transfer', ['amount' => -2]);
+
+    $transfer = $ledger->transfer($sourceTransfer, 'acct-123', 'acct-201', $time, 'transfer request');
+
+    $this->assertDatabaseCount('ledger_transaction', 3);
+
+    $this->assertDatabaseHas('ledger_transaction', [
+        'entered_by_user_id' => '89',
+        'recorded_at' => '2026-06-02 00:00:00',
+        'reverses_transaction_id' => null,
+        'adjusts_transaction_id' => null,
+        'correlation_id' => null,
+        'payload_type' => 'deposit',
+        'ledger_type' => 'cash-account',
+        'ledger_id' => 'acct-123',
+        'effective_at' => '2026-06-01 00:00:00',
+        'reason' => 'weekly deposit',
+    ]);
+
+    $this->assertDatabaseHas('ledger_transaction', [
+        'entered_by_user_id' => '89',
+        'recorded_at' => '2026-06-02 00:00:00',
+        'reverses_transaction_id' => null,
+        'adjusts_transaction_id' => null,
+        'correlation_id' => $transfer->correlationId,
+        'payload_type' => 'transfer',
+        'ledger_type' => 'cash-account',
+        'ledger_id' => 'acct-123',
+        'effective_at' => '2026-06-02 00:00:00',
+        'reason' => 'transfer request',
+    ]);
+
+    $this->assertDatabaseHas('ledger_transaction', [
+        'entered_by_user_id' => '89',
+        'recorded_at' => '2026-06-02 00:00:00',
+        'reverses_transaction_id' => null,
+        'adjusts_transaction_id' => null,
+        'correlation_id' => $transfer->correlationId,
+        'payload_type' => 'transfer',
+        'ledger_type' => 'cash-account',
+        'ledger_id' => 'acct-201',
+        'effective_at' => '2026-06-02 00:00:00',
+        'reason' => 'transfer request',
+    ]);
+
+    $this->assertEquals(['total' => 3], $ledger->getAggregate('acct-123'));
+    $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-201'));
 });
 
 function fakeUser(): User

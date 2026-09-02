@@ -20,20 +20,21 @@ use Illuminate\Database\Eloquent\Model;
  * @property string $reason
  * @property ?string $reverses_transaction_id
  * @property ?string $adjusts_transaction_id
+ * @property ?string $correlation_id
  * @property CarbonImmutable $effective_at
  * @property CarbonImmutable $recorded_at
  * @property string $entered_by_user_id
  */
 class LedgerTransaction extends Model
 {
-    public const CREATED_AT = null; // The ledger records its system time in recorded_at.
-
-    public const UPDATED_AT = null; // Disable standard updated_at.
-
     /** @use HasFactory<LedgerTransactionFactory> */
     use HasFactory;
 
     use HasUlids;
+
+    public const CREATED_AT = null; // The ledger records its system time in recorded_at.
+
+    public const UPDATED_AT = null; // Disable standard updated_at.
 
     protected $table = 'ledger_transaction';
 
