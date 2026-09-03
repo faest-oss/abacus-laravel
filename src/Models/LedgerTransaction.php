@@ -55,7 +55,7 @@ class LedgerTransaction extends Model
     protected static function booted(): void
     {
         // Throw exceptions if any code attempts to mutate the past
-        static::updating(fn() => throw new LedgerImmutableException('Ledger entries cannot be modified.'));
-        static::deleting(fn() => throw new LedgerImmutableException('Ledger entries cannot be deleted.'));
+        static::updating(fn () => throw new LedgerImmutableException('Ledger entries cannot be modified.'));
+        static::deleting(fn () => throw new LedgerImmutableException('Ledger entries cannot be deleted.'));
     }
 }

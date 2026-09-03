@@ -8,7 +8,7 @@ use Illuminate\Support\Carbon;
 
 function createLedgerTransaction(): LedgerTransaction
 {
-    $transaction = new LedgerTransaction();
+    $transaction = new LedgerTransaction;
     $transaction->ledger_type = 'utility-billing';
     $transaction->ledger_id = 'account-123';
     $transaction->payload = json_encode(['type' => 'charge', 'amount' => 1250], JSON_THROW_ON_ERROR);
@@ -47,13 +47,13 @@ it('prevents a ledger transaction from being updated', function () {
 
     $transaction->ledger_id = 'account-789';
 
-    expect(fn() => $transaction->save())
+    expect(fn () => $transaction->save())
         ->toThrow(LedgerImmutableException::class, 'Ledger entries cannot be modified.');
 });
 
 it('prevents a ledger transaction from being deleted', function () {
     $transaction = createLedgerTransaction();
 
-    expect(fn() => $transaction->delete())
+    expect(fn () => $transaction->delete())
         ->toThrow(LedgerImmutableException::class, 'Ledger entries cannot be deleted.');
 });

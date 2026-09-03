@@ -125,7 +125,7 @@ readonly class TransactionDraft
         );
     }
 
-    public function failIfVersionIsnt(int $expectedVersion): self
+    public function failIfVersionIsnt(?int $expectedVersion): self
     {
         return new self(
             payload: $this->payload,

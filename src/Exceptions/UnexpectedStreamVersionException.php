@@ -19,7 +19,7 @@ class UnexpectedStreamVersionException extends Exception
         public int $expectedVersion,
         public int $actualVersion,
         int $code = 0,
-        ?Throwable $previous = null
+        ?Throwable $previous = null,
     ) {
         parent::__construct($message, $code, $previous);
     }

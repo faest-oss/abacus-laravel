@@ -64,7 +64,7 @@ abstract class AbstractLedger
 
     private function toDto(LedgerTransaction $model): Transaction
     {
-        return new Transaction($model->id);
+        return new Transaction($model->id, $model->stream_version);
     }
 
     abstract public function computeOpposing(LedgerPayload $payload): LedgerPayload;
@@ -84,7 +84,7 @@ abstract class AbstractLedger
         /* @var Collection<int, LedgerTransaction> $history */
         $history = LedgerTransaction::query()->where('ledger_type', $this->getLedgerType())
             ->where('ledger_id', $ledgerId)
-            ->orderBy('id', 'asc')
+            ->orderBy('stream_version', 'asc')
             ->get();
 
         $aggregate = $this->initializeAggregate();
@@ -104,8 +104,8 @@ abstract class AbstractLedger
     {
         $this->setupLockRecords([$draft->ledgerId]);
 
-        return DB::connection()->transaction(fn() => $this->performPost(
-            $draft
+        return DB::connection()->transaction(fn () => $this->performPost(
+            $draft,
         ));
     }
 
@@ -165,7 +165,7 @@ abstract class AbstractLedger
                 $this->getLedgerType(),
                 $draft->ledgerId,
                 $draft->expectedVersion,
-                $currentVersion
+                $currentVersion,
             );
         }
 
@@ -194,7 +194,7 @@ abstract class AbstractLedger
         /* @var Collection<int, LedgerTransaction> $history */
         $history = LedgerTransaction::query()->where('ledger_type', $this->getLedgerType())
             ->where('ledger_id', $draft->ledgerId)
-            ->orderBy('id', 'asc')
+            ->orderBy('stream_version', 'asc')
             ->get();
 
         $aggregate = $this->getAggregate($draft->ledgerId);
@@ -206,7 +206,7 @@ abstract class AbstractLedger
             throw new Exception('Ledgers updates must be made by authenticated actors');
         }
 
-        $newEntry = new LedgerTransaction();
+        $newEntry = new LedgerTransaction;
         $newEntry->entered_by_user_id = (string) $authId;
         $newEntry->recorded_at = now()->toImmutable();
         $newEntry->reverses_transaction_id = $reversesId;
@@ -240,18 +240,18 @@ abstract class AbstractLedger
         }
         $payload = $this->deserialize($transactionToReverse->payload_type, $transactionToReverse->payload);
 
-
         $this->setupLockRecords([$transactionToReverse->ledger_id]);
 
-        return DB::connection()->transaction(fn() => $this->performPost(
+        return DB::connection()->transaction(fn () => $this->performPost(
             TransactionDraft::make(
                 $transactionToReverse->ledger_id,
-                $this->computeOpposing($payload)
+                $this->computeOpposing($payload),
             )
-            ->withReason($draft->reason)
-            ->occurredAt($draft->eventDate)
-            ->bookedFor($draft->accountingDate)
-            ->correlateUsing($draft->correlationId),
+                ->withReason($draft->reason)
+                ->occurredAt($draft->eventDate)
+                ->bookedFor($draft->accountingDate)
+                ->failIfVersionIsnt($draft->expectedVersion)
+                ->correlateUsing($draft->correlationId),
             reversesId: $draft->transactionId,
         ));
     }

@@ -8,5 +8,6 @@ final readonly class Transaction
 {
     public function __construct(
         public string $id,
+        public int $version,
     ) {}
 }
