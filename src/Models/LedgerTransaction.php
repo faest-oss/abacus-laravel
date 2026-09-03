@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property string $id
  * @property string $ledger_type
  * @property string $ledger_id
+ * @property int $stream_version
  * @property string $payload_type
  * @property array<mixed> $payload
  * @property string $reason
@@ -23,6 +24,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property ?string $correlation_id
  * @property CarbonImmutable $effective_at
  * @property CarbonImmutable $recorded_at
+ * @property CarbonImmutable $accounting_date
  * @property string $entered_by_user_id
  */
 class LedgerTransaction extends Model
@@ -45,6 +47,7 @@ class LedgerTransaction extends Model
         return [
             'recorded_at' => 'immutable_datetime',
             'effective_at' => 'immutable_datetime',
+            'accounting_date' => 'immutable_datetime',
             'payload' => 'array',
         ];
     }
@@ -52,7 +55,7 @@ class LedgerTransaction extends Model
     protected static function booted(): void
     {
         // Throw exceptions if any code attempts to mutate the past
-        static::updating(fn () => throw new LedgerImmutableException('Ledger entries cannot be modified.'));
-        static::deleting(fn () => throw new LedgerImmutableException('Ledger entries cannot be deleted.'));
+        static::updating(fn() => throw new LedgerImmutableException('Ledger entries cannot be modified.'));
+        static::deleting(fn() => throw new LedgerImmutableException('Ledger entries cannot be deleted.'));
     }
 }

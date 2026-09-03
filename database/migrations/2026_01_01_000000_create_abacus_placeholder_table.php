@@ -7,8 +7,7 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
-return new class extends Migration
-{
+return new class extends Migration {
     public function up(): void
     {
         Schema::create('ledger_transaction', function (Blueprint $table) {
@@ -24,9 +23,10 @@ return new class extends Migration
             $table->uuid('correlation_id')->nullable(true);
             $table->timestamp('effective_at');
             $table->timestamp('recorded_at');
+            $table->timestamp('accounting_date');
             $table->string('entered_by_user_id');
 
-            $this->unique(['ledger_type', 'ledger_id', 'stream_version']);
+            $table->unique(['ledger_type', 'ledger_id', 'stream_version']);
         });
 
         Schema::create('ledger_stream_head', function (Blueprint $table) {

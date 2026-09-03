@@ -1,0 +1,42 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Faest\Abacus\Exceptions;
+
+use Exception;
+use Throwable;
+
+// use Illuminate\Http\Request;
+// use Illuminate\Http\Response;
+
+class UnexpectedStreamVersionException extends Exception
+{
+    public function __construct(
+        string $message,
+        public string $ledgerType,
+        public string $ledgerId,
+        public int $expectedVersion,
+        public int $actualVersion,
+        int $code = 0,
+        ?Throwable $previous = null
+    ) {
+        parent::__construct($message, $code, $previous);
+    }
+
+    /**
+     * Report the exception.
+     */
+    public function report(): void
+    {
+        //
+    }
+
+    /**
+     * Render the exception as an HTTP response.
+     */
+    // public function render(Request $request): Response
+    // {
+    //     //
+    // }
+}

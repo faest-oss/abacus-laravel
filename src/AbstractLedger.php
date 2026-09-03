@@ -11,6 +11,9 @@ use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\Transaction;
 use Faest\Abacus\Data\TransactionDraft;
+use Faest\Abacus\Data\VoidDraft;
+use Faest\Abacus\Exceptions\IllegalVoidException;
+use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -99,10 +102,19 @@ abstract class AbstractLedger
 
     public function post(TransactionDraft $draft): Transaction
     {
-        $this->setupLockRecords([$ledgerId]);
+        $this->setupLockRecords([$draft->ledgerId]);
 
-        return DB::connection()->transaction(fn () => $this->performPost(
-            $ledgerId, $payload, $reason, $effectiveAt));
+        return DB::connection()->transaction(fn() => $this->performPost(
+            $draft
+        ));
+    }
+
+    public function streamVersion(string $ledgerId): int
+    {
+        return DB::connection()->table('ledger_stream_head')->where([
+            'ledger_type' => $this->getLedgerType(),
+            'ledger_id' => $ledgerId,
+        ])->first()->version ?? 0;
     }
 
     /**
@@ -110,12 +122,12 @@ abstract class AbstractLedger
      */
     private function setupLockRecords(array $ledgerIds): void
     {
+        $pairs = [];
         foreach ($ledgerIds as $id) {
-            DB::connection()->table('ledger_stream_head')->upsert([
-                'ledger_type' => $this->getLedgerType(),
-                'ledger_id' => $id,
-            ], ['ledger_type', 'ledger_id']);
+            $pairs[] = ['ledger_type' => $this->getLedgerType(), 'ledger_id' => $id];
         }
+
+        DB::connection()->table('ledger_stream_head')->insertOrIgnore($pairs);
     }
 
     /**
@@ -144,6 +156,20 @@ abstract class AbstractLedger
         }
 
         $this->lockLedgers([$draft->ledgerId]);
+
+        $currentVersion = $this->streamVersion($draft->ledgerId);
+
+        if ($draft->expectedVersion !== null && $draft->expectedVersion !== $currentVersion) {
+            throw new UnexpectedStreamVersionException(
+                'Stream expectation failed',
+                $this->getLedgerType(),
+                $draft->ledgerId,
+                $draft->expectedVersion,
+                $currentVersion
+            );
+        }
+
+        $nextVersion = $currentVersion + 1;
 
         if ($reversesId) {
             $existingReversal = LedgerTransaction::query()
@@ -180,7 +206,7 @@ abstract class AbstractLedger
             throw new Exception('Ledgers updates must be made by authenticated actors');
         }
 
-        $newEntry = new LedgerTransaction;
+        $newEntry = new LedgerTransaction();
         $newEntry->entered_by_user_id = (string) $authId;
         $newEntry->recorded_at = now()->toImmutable();
         $newEntry->reverses_transaction_id = $reversesId;
@@ -190,25 +216,43 @@ abstract class AbstractLedger
         $newEntry->ledger_type = $this->getLedgerType();
         $newEntry->ledger_id = $draft->ledgerId;
         $newEntry->effective_at = $draft->eventDate->toImmutable();
+        $newEntry->accounting_date = $draft->accountingDate->toImmutable();
         $newEntry->payload = $draft->payload->jsonSerialize();
         $newEntry->reason = $draft->reason;
+        $newEntry->stream_version = $nextVersion;
         $newEntry->save();
+
+        DB::connection()->table('ledger_stream_head')->where([
+            'ledger_type' => $this->getLedgerType(),
+            'ledger_id' => $draft->ledgerId,
+        ])->update(['version' => $nextVersion]);
 
         return $this->toDto($newEntry);
     }
 
-    public function void(string $id, string $reason, ?CarbonImmutable $effectiveAt = null): Transaction
+    public function void(VoidDraft $draft): Transaction
     {
-        $transactionToReverse = LedgerTransaction::query()->findSole($id);
+        $transactionToReverse = LedgerTransaction::query()->findSole($draft->transactionId);
+
+        if ($transactionToReverse->ledger_type !== $this->getLedgerType()) {
+            throw new IllegalVoidException("Transaction {$draft->transactionId}
+                does not belong to ledger {$this->getLedgerType()}");
+        }
         $payload = $this->deserialize($transactionToReverse->payload_type, $transactionToReverse->payload);
+
+
         $this->setupLockRecords([$transactionToReverse->ledger_id]);
 
-        return DB::connection()->transaction(fn () => $this->performPost(
-            $transactionToReverse->ledger_id,
-            $this->computeOpposing($payload),
-            $reason,
-            $effectiveAt ? $effectiveAt : $transactionToReverse->effective_at,
-            reversesId: $id,
+        return DB::connection()->transaction(fn() => $this->performPost(
+            TransactionDraft::make(
+                $transactionToReverse->ledger_id,
+                $this->computeOpposing($payload)
+            )
+            ->withReason($draft->reason)
+            ->occurredAt($draft->eventDate)
+            ->bookedFor($draft->accountingDate)
+            ->correlateUsing($draft->correlationId),
+            reversesId: $draft->transactionId,
         ));
     }
 
@@ -221,13 +265,24 @@ abstract class AbstractLedger
     ): LedgerTransferResult {
         $this->setupLockRecords([$sourceLedgerId, $destinationLedgerId]);
 
-        return DB::connection()->transaction(function () use ($payload, $sourceLedgerId, $destinationLedgerId, $effectiveAt, $reason) {
-            $this->lockLedgers([$sourceLedgerId, $destinationLedgerId]);
-            $correlationId = (string) Str::orderedUuid();
-            $source = $this->performPost($sourceLedgerId, $payload, $reason, $effectiveAt, correlationId: $correlationId);
-            $dest = $this->performPost($destinationLedgerId, $this->computeOpposing($payload), $reason, $effectiveAt, correlationId: $correlationId);
+        $correlationId = (string) Str::orderedUuid();
 
-            return new LedgerTransferResult($correlationId, $source, $dest);
+        $source = TransactionDraft::make($sourceLedgerId, $payload)
+            ->correlateUsing($correlationId)
+            ->occurredAt($effectiveAt)
+            ->withReason($reason);
+
+        $dest = TransactionDraft::make($destinationLedgerId, $this->computeOpposing($payload))
+            ->correlateUsing($correlationId)
+            ->occurredAt($effectiveAt)
+            ->withReason($reason);
+
+        return DB::connection()->transaction(function () use ($source, $dest, $correlationId) {
+            $this->lockLedgers([$source->ledgerId, $dest->ledgerId]);
+            $sourceResult = $this->performPost($source, correlationId: $correlationId);
+            $destResult = $this->performPost($dest, correlationId: $correlationId);
+
+            return new LedgerTransferResult($source->correlationId, $sourceResult, $destResult);
         });
     }
 }
