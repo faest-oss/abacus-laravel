@@ -6,14 +6,15 @@ use Carbon\CarbonImmutable;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\TransactionDraft;
+use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
+use Faest\Abacus\Tests\Fixtures\TwoProcessHarness;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
 use function Pest\Laravel\assertDatabaseCount;
 use function Pest\Laravel\assertDatabaseHas;
-use function PHPUnit\Framework\assertTrue;
 
 beforeEach(function () {
     if (config('database.default') === 'sqlite') {
@@ -27,32 +28,122 @@ beforeEach(function () {
     DB::connection()->table('ledger_stream_head')->truncate();
 });
 
-test('posts are serialized', function () {
-    $this->travelTo(CarbonImmutable::parse('2026-06-02'));
+test('posts acquire an exclusive stream head lock', function () {
+    $firstLedger = new SimpleLedger;
+    $firstLedger->overrideConnection('pgsql');
 
-    $ledger1 = new SimpleLedger;
-    $ledger1->overrideConnection('pgsql');
-    $ledger2 = new SimpleLedger;
-    $ledger2->overrideLockTimeout(0);
-    $ledger2->overrideConnection('pgsql2');
+    $secondLedger = new SimpleLedger;
+    $secondLedger->overrideConnection('pgsql2');
+    $secondLedger->overrideLockTimeout(0);
 
-    $lockTested = false;
-    DB::connection('pgsql')->listen(function ($query) use (&$lockTested, $ledger2) {
-        if (str_contains(strtolower($query->sql), 'for update')) {
-            try {
-                $ledger2->post(stdTrans());
-            } catch (QueryException $e) {
-                expect($e->getCode())->toBe('55P03');
-                $lockTested = true;
-            }
+    $lockWasContended = false;
+
+    DB::connection('pgsql')->listen(function ($query) use ($secondLedger, &$lockWasContended) {
+        if (! str_contains(strtolower($query->sql), 'for update')) {
+            return;
+        }
+
+        try {
+            $secondLedger->post(stdTrans()->failIfVersionIsnt(0));
+        } catch (QueryException $exception) {
+            expect($exception->getCode())->toBe('55P03');
+            $lockWasContended = true;
         }
     });
 
-    $ledger1->post(stdTrans(payload: stdPayload(payload: ['amount' => 25])));
-    assertTrue($lockTested);
+    $firstLedger->post(stdTrans(
+        payload: GenericPayload::make('deposit', ['amount' => 25]),
+    )->failIfVersionIsnt(0));
+
+    expect($lockWasContended)->toBeTrue();
     assertDatabaseCount('ledger_transaction', 1);
-    assertDatabaseHas('ledger_transaction', stdDbRecord());
-    expect(LedgerTransaction::on('pgsql')->sole()->payload)->toBe(['amount' => 25]);
+    assertDatabaseHas('ledger_stream_head', [
+        'ledger_type' => 'cash-account',
+        'ledger_id' => '234',
+        'version' => 1,
+    ]);
+    expect(LedgerTransaction::query()->sole()->payload)->toBe(['amount' => 25]);
+});
+
+test('only one concurrent first post can expect version zero', function () {
+    $draft = stdTrans()->failIfVersionIsnt(0);
+    $post = static function () use ($draft): array {
+        $ledger = new SimpleLedger;
+
+        try {
+            $transaction = $ledger->post($draft);
+
+            return ['outcome' => 'committed', 'version' => $transaction->version];
+        } catch (UnexpectedStreamVersionException $exception) {
+            return ['outcome' => 'version-mismatch', 'version' => $exception->actualVersion];
+        }
+    };
+
+    $results = TwoProcessHarness::run($post, $post);
+
+    expect(array_column($results, 'outcome'))
+        ->toContain('committed')
+        ->toContain('version-mismatch')
+        ->and(array_column($results, 'version'))->each->toBe(1);
+
+    assertDatabaseCount('ledger_transaction', 1);
+    assertDatabaseHas('ledger_stream_head', [
+        'ledger_type' => 'cash-account',
+        'ledger_id' => '234',
+        'version' => 1,
+    ]);
+    expect(LedgerTransaction::query()->sole()->payload)->toBe(['amount' => 2]);
+});
+
+test('opposing post many calls acquire stream locks in the same order', function () {
+    $firstDrafts = [stdTrans('account-b'), stdTrans('account-a')];
+    $secondDrafts = [stdTrans('account-a'), stdTrans('account-b')];
+
+    $postMany = static function (array $drafts): Closure {
+        return static function () use ($drafts): array {
+            $lockOrder = [];
+
+            DB::listen(static function ($query) use (&$lockOrder) {
+                if (str_contains(strtolower($query->sql), 'for update')) {
+                    $lockOrder[] = (string) end($query->bindings);
+                }
+            });
+
+            $transactions = (new SimpleLedger)->postMany($drafts);
+
+            return [
+                'lockOrder' => array_slice($lockOrder, 0, 2),
+                'versions' => array_map(
+                    static fn ($transaction): int => $transaction->version,
+                    $transactions,
+                ),
+            ];
+        };
+    };
+
+    $results = TwoProcessHarness::run(
+        $postMany($firstDrafts),
+        $postMany($secondDrafts),
+    );
+
+    $versions = array_column($results, 'versions');
+    sort($versions);
+
+    expect($results[0]['lockOrder'])->toBe(['account-a', 'account-b'])
+        ->and($results[1]['lockOrder'])->toBe(['account-a', 'account-b'])
+        ->and($versions)->toBe([[1, 1], [2, 2]]);
+
+    assertDatabaseCount('ledger_transaction', 4);
+    assertDatabaseHas('ledger_stream_head', [
+        'ledger_type' => 'cash-account',
+        'ledger_id' => 'account-a',
+        'version' => 2,
+    ]);
+    assertDatabaseHas('ledger_stream_head', [
+        'ledger_type' => 'cash-account',
+        'ledger_id' => 'account-b',
+        'version' => 2,
+    ]);
 });
 
 function stdTrans(string $ledgerId = '234', ?LedgerPayload $payload = null): TransactionDraft
@@ -66,41 +157,4 @@ function stdTrans(string $ledgerId = '234', ?LedgerPayload $payload = null): Tra
         ->withReason('paycheck deposit')
         ->occurredAt(CarbonImmutable::parse('2026-06-01'))
         ->bookedFor(CarbonImmutable::parse('2026-06-01'));
-}
-
-/**
- * @param  array<string, mixed>  $payload
- */
-function stdPayload(
-    string $payloadType = 'deposit',
-    array $payload = [],
-): LedgerPayload {
-    return GenericPayload::make($payloadType, array_merge([
-        'amount' => 2,
-    ], $payload));
-}
-
-/**
- * @param  array<string, mixed>  $record
- * @return array<mixed>
- */
-function stdDbRecord(array $record = []): array
-{
-    return array_merge(
-        [
-            'entered_by_user_id' => 'usr-123',
-            'recorded_at' => '2026-06-02 00:00:00',
-            'reverses_transaction_id' => null,
-            'adjusts_transaction_id' => null,
-            'correlation_id' => null,
-            'payload_type' => 'deposit',
-            'ledger_type' => 'cash-account',
-            'ledger_id' => '234',
-            'effective_at' => '2026-06-01 00:00:00',
-            'accounting_date' => '2026-06-01 00:00:00',
-            'reason' => 'paycheck deposit',
-            'stream_version' => 1,
-        ],
-        $record,
-    );
 }

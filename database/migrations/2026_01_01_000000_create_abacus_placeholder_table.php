@@ -11,11 +11,18 @@ return new class extends Migration
 {
     public function up(): void
     {
+        Schema::create('ledger_stream_head', function (Blueprint $table) {
+            $table->string('ledger_type');
+            $table->string('ledger_id');
+            $table->bigInteger('version')->default(0);
+            $table->primary(['ledger_type', 'ledger_id']);
+        });
+
         Schema::create('ledger_transaction', function (Blueprint $table) {
             $table->ulid('id')->primary();
             $table->string('ledger_type');
             $table->string('ledger_id');
-            $table->unsignedBigInteger('stream_version');
+            $table->bigInteger('stream_version');
             $table->string('payload_type');
             $table->json('payload');
             $table->string('reason');
@@ -28,13 +35,10 @@ return new class extends Migration
             $table->string('entered_by_user_id');
 
             $table->unique(['ledger_type', 'ledger_id', 'stream_version']);
-        });
-
-        Schema::create('ledger_stream_head', function (Blueprint $table) {
-            $table->string('ledger_type');
-            $table->string('ledger_id');
-            $table->unsignedBigInteger('version')->default(0);
-            $table->primary(['ledger_type', 'ledger_id']);
+            $table->foreign(['ledger_type', 'ledger_id'])
+                ->references(['ledger_type', 'ledger_id'])
+                ->on('ledger_stream_head')
+                ->restrictOnDelete();
         });
     }
 

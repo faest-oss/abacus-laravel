@@ -15,27 +15,27 @@ abstract class TestCase extends Orchestra
         $app['config']->set('database.connections.sqlite.database', ':memory:');
 
         $app['config']->set('database.connections.pgsql', [
-            'driver'   => 'pgsql',
-            'host'     => '127.0.0.1',
-            'port'     => '54322',
+            'driver' => 'pgsql',
+            'host' => '127.0.0.1',
+            'port' => '54322',
             'database' => 'abacus',
             'username' => 'user',
             'password' => 'password',
-            'charset'  => 'utf8',
-            'prefix'   => '',
+            'charset' => 'utf8',
+            'prefix' => '',
             'search_path' => 'public',
         ]);
 
         // Clone the pgsql connection for concurrency testing
         $app['config']->set(
             'database.connections.pgsql2',
-            $app['config']->get('database.connections.pgsql')
+            $app['config']->get('database.connections.pgsql'),
         );
     }
 
     protected function defineDatabaseMigrations(): void
     {
-        $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
     }
 
     protected function getPackageProviders($app): array

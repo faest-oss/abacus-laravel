@@ -12,13 +12,16 @@ use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\Transaction;
 use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Data\VoidDraft;
+use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IllegalVoidException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
 use Illuminate\Database\Connection;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use JsonSerializable;
 use LogicException;
 
@@ -87,7 +90,7 @@ abstract class AbstractLedger
     public function getAggregate(string $ledgerId): array|JsonSerializable
     {
         /* @var Collection<int, LedgerTransaction> $history */
-        $history = LedgerTransaction::query()->where('ledger_type', $this->getLedgerType())
+        $history = $this->ledgerTranQuery()->where('ledger_type', $this->getLedgerType())
             ->where('ledger_id', $ledgerId)
             ->orderBy('stream_version', 'asc')
             ->get();
@@ -109,9 +112,31 @@ abstract class AbstractLedger
     {
         $this->setupLockRecords([$draft->ledgerId]);
 
-        return $this->conn()->transaction(fn () => $this->performPost(
-            $draft,
-        ));
+        return $this->conn()->transaction(function () use ($draft) {
+            $this->lockLedgers([$draft->ledgerId]);
+
+            return $this->performPost($draft);
+        });
+    }
+
+    /**
+     * @param  array<int, TransactionDraft>  $drafts
+     * @return array<int, Transaction>
+     */
+    final public function postMany(array $drafts): array
+    {
+        $ledgerIds = collect($drafts)->pluck('ledgerId')->all();
+        $this->setupLockRecords($ledgerIds);
+
+        return $this->conn()->transaction(function () use ($drafts, $ledgerIds) {
+            $this->lockLedgers($ledgerIds);
+            $results = [];
+            foreach ($drafts as $draft) {
+                $results[] = $this->performPost($draft);
+            }
+
+            return $results;
+        });
     }
 
     public function streamVersion(string $ledgerId): int
@@ -127,6 +152,9 @@ abstract class AbstractLedger
      */
     private function setupLockRecords(array $ledgerIds): void
     {
+        $ledgerIds = array_unique($ledgerIds);
+        usort($ledgerIds, fn (string $a, string $b): int => strnatcmp($a, $b));
+
         $pairs = [];
         foreach ($ledgerIds as $id) {
             $pairs[] = ['ledger_type' => $this->getLedgerType(), 'ledger_id' => $id];
@@ -140,7 +168,8 @@ abstract class AbstractLedger
      */
     private function lockLedgers(array $ledgerIds): void
     {
-        sort($ledgerIds);
+        $ledgerIds = array_unique($ledgerIds);
+        usort($ledgerIds, fn (string $a, string $b): int => strnatcmp($a, $b));
 
         if ($this->lockTimeout) {
             $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
@@ -171,7 +200,9 @@ abstract class AbstractLedger
             throw new LogicException('Ledger operations must run within a db transaction');
         }
 
-        $this->lockLedgers([$draft->ledgerId]);
+        if ($draft->expectedVersion !== null && $draft->expectedVersion < 0) {
+            throw new InvalidArgumentException('Expected version must not be negative');
+        }
 
         $currentVersion = $this->streamVersion($draft->ledgerId);
 
@@ -188,7 +219,7 @@ abstract class AbstractLedger
         $nextVersion = $currentVersion + 1;
 
         if ($reversesId) {
-            $existingReversal = LedgerTransaction::query()
+            $existingReversal = $this->ledgerTranQuery()
                 ->where('reverses_transaction_id', $reversesId)
                 ->first();
 
@@ -198,7 +229,7 @@ abstract class AbstractLedger
         }
 
         if ($adjustsId) {
-            $existingAdjustment = LedgerTransaction::query()
+            $existingAdjustment = $this->ledgerTranQuery()
                 ->where('adjusts_transaction_id', $adjustsId)
                 ->first();
 
@@ -207,14 +238,13 @@ abstract class AbstractLedger
             }
         }
 
-        /* @var Collection<int, LedgerTransaction> $history */
-        $history = LedgerTransaction::query()->where('ledger_type', $this->getLedgerType())
-            ->where('ledger_id', $draft->ledgerId)
-            ->orderBy('stream_version', 'asc')
-            ->get();
-
         $aggregate = $this->getAggregate($draft->ledgerId);
-        $this->assertInvariants($draft->payload, $aggregate);
+
+        try {
+            $this->assertInvariants($draft->payload, $aggregate);
+        } catch (Exception $e) {
+            throw new FailedInvariantException($e->getMessage(), $draft, previous: $e);
+        }
 
         $authId = $draft->userId ? $draft->userId : Auth::id();
 
@@ -223,6 +253,7 @@ abstract class AbstractLedger
         }
 
         $newEntry = new LedgerTransaction;
+        $newEntry->setConnection($this->connectionOverride);
         $newEntry->entered_by_user_id = (string) $authId;
         $newEntry->recorded_at = now()->toImmutable();
         $newEntry->reverses_transaction_id = $reversesId;
@@ -248,7 +279,7 @@ abstract class AbstractLedger
 
     public function void(VoidDraft $draft): Transaction
     {
-        $transactionToReverse = LedgerTransaction::query()->findSole($draft->transactionId);
+        $transactionToReverse = $this->ledgerTranQuery()->findSole($draft->transactionId);
 
         if ($transactionToReverse->ledger_type !== $this->getLedgerType()) {
             throw new IllegalVoidException("Transaction {$draft->transactionId}
@@ -279,8 +310,6 @@ abstract class AbstractLedger
         CarbonImmutable $effectiveAt,
         string $reason,
     ): LedgerTransferResult {
-        $this->setupLockRecords([$sourceLedgerId, $destinationLedgerId]);
-
         $correlationId = (string) Str::orderedUuid();
 
         $source = TransactionDraft::make($sourceLedgerId, $payload)
@@ -292,6 +321,8 @@ abstract class AbstractLedger
             ->correlateUsing($correlationId)
             ->occurredAt($effectiveAt)
             ->withReason($reason);
+
+        $this->setupLockRecords([$source->ledgerId, $dest->ledgerId]);
 
         return $this->conn()->transaction(function () use ($source, $dest, $correlationId) {
             $this->lockLedgers([$source->ledgerId, $dest->ledgerId]);
@@ -305,6 +336,14 @@ abstract class AbstractLedger
     private function conn(): Connection
     {
         return DB::connection($this->connectionOverride);
+    }
+
+    /**
+     * @return Builder<LedgerTransaction>
+     */
+    private function ledgerTranQuery(): Builder
+    {
+        return LedgerTransaction::on($this->connectionOverride);
     }
 
     public function overrideConnection(string $connection): void

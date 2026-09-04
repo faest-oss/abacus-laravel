@@ -4,10 +4,19 @@ declare(strict_types=1);
 
 use Faest\Abacus\Exceptions\LedgerImmutableException;
 use Faest\Abacus\Models\LedgerTransaction;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
-function createLedgerTransaction(): LedgerTransaction
+function createLedgerTransaction(bool $createStreamHead = true): LedgerTransaction
 {
+    if ($createStreamHead) {
+        DB::table('ledger_stream_head')->insertOrIgnore([
+            'ledger_type' => 'utility-billing',
+            'ledger_id' => 'account-123',
+        ]);
+    }
+
     $transaction = new LedgerTransaction;
     $transaction->ledger_type = 'utility-billing';
     $transaction->ledger_id = 'account-123';
@@ -40,6 +49,20 @@ it('persists a ledger transaction with a ULID and no updated timestamp', functio
 
 it('does not retain records created by an earlier test', function () {
     $this->assertDatabaseCount('ledger_transaction', 0);
+});
+
+it('requires a stream head for every ledger transaction', function () {
+    expect(fn () => createLedgerTransaction(createStreamHead: false))
+        ->toThrow(QueryException::class);
+});
+
+it('does not allow a stream head with transactions to be deleted', function () {
+    createLedgerTransaction();
+
+    expect(fn () => DB::table('ledger_stream_head')->where([
+        'ledger_type' => 'utility-billing',
+        'ledger_id' => 'account-123',
+    ])->delete())->toThrow(QueryException::class);
 });
 
 it('prevents a ledger transaction from being updated', function () {

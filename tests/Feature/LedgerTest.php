@@ -7,11 +7,18 @@ use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Data\VoidDraft;
+use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
+use Faest\Abacus\Tests\TestCase;
 use Workbench\App\Models\User;
 
+use function Pest\Laravel\assertDatabaseCount;
+use function Pest\Laravel\assertDatabaseHas;
+use function PHPUnit\Framework\assertEquals;
+
 it('posts transactions', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
 
     $this->assertDatabaseCount('ledger_transaction', 0);
@@ -30,7 +37,38 @@ it('posts transactions', function () {
     ]));
 });
 
+it('posts multiple transactions', function () {
+    /** @var TestCase $this */
+    $ledger = new SimpleLedger;
+
+    assertDatabaseCount('ledger_transaction', 0);
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+
+    $draft = standardTransaction(payload: standardPayload(payload: ['amount' => 1]));
+    $draft2 = standardTransaction(payload: standardPayload(payload: ['amount' => -1]))
+        ->withReason('#2');
+    $results = $ledger->postMany([$draft, $draft2]);
+
+    $this->assertEquals(2, count($results));
+    $this->assertNotEquals($results[0]->id, $results[1]->id);
+    $this->assertEquals(1, $results[0]->version);
+    $this->assertEquals(2, $results[1]->version);
+    assertDatabaseCount('ledger_transaction', 2);
+    assertDatabaseHas('ledger_transaction', standardDbRecord([
+        'id' => $results[0]->id,
+        'reason' => 'paycheck deposit',
+    ]));
+
+    assertDatabaseHas('ledger_transaction', standardDbRecord([
+        'id' => $results[1]->id,
+        'reason' => '#2',
+        'stream_version' => 2,
+    ]));
+});
+
 it('enforces domain invariants', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
 
     $this->assertDatabaseCount('ledger_transaction', 0);
@@ -47,11 +85,29 @@ it('enforces domain invariants', function () {
 
     $this->assertEquals(0, $ledger->streamVersion(standardLedgerId()));
 
-    $this->assertDatabaseCount('ledger_transaction', 0);
-    $this->assertDatabaseCount('ledger_stream_head', 1);
+    assertDatabaseCount('ledger_transaction', 0);
+    assertDatabaseCount('ledger_stream_head', 1);
+});
+
+it('posts multiple transactions - all of or none of', function () {
+    /** @var TestCase $this */
+    $ledger = new SimpleLedger;
+
+    assertDatabaseCount('ledger_transaction', 0);
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+
+    $draft = standardTransaction();
+    $draft2 = standardTransaction(payload: standardPayload('withdraw', ['amount' => -500]));
+    expect(fn () => $ledger->postMany([$draft, $draft2]))->toThrow(function (FailedInvariantException $e) use ($draft2) {
+        assertEquals($draft2, $e->getFailedDraft());
+    });
+
+    assertDatabaseCount('ledger_transaction', 0);
 });
 
 it('calculates aggregates', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
 
     $this->actingAs(fakeUser());
@@ -81,6 +137,7 @@ it('calculates aggregates', function () {
 });
 
 it('voids transactions', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
 
     $time = CarbonImmutable::parse('2026-06-02');
@@ -136,6 +193,7 @@ it('voids transactions', function () {
 });
 
 it('transfers between ledger ids', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
 
     $time = CarbonImmutable::parse('2026-06-02');
@@ -198,12 +256,21 @@ it('transfers between ledger ids', function () {
     $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-201'));
 });
 
+it('rejects negative expected version ids', function () {
+    $ledger = new SimpleLedger;
+
+    expect(fn () => $ledger->post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
+    assertDatabaseCount('ledger_transaction', 0);
+});
+
 test('stream version is zero when stream is empty', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
     $this->assertEquals(0, $ledger->streamVersion('234'));
 });
 
 test('stream version increments', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
 
     $transaction = $ledger->post(TransactionDraft::make('234', GenericPayload::make('deposit', [
@@ -218,6 +285,7 @@ test('stream version increments', function () {
 });
 
 test('locking on version zero works when ledger is empty', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
@@ -231,6 +299,7 @@ test('locking on version zero works when ledger is empty', function () {
 });
 
 test('locking on version zero fails when ledger is not empty', function () {
+    /** @var TestCase $this */
     $ledger = new SimpleLedger;
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
