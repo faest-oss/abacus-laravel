@@ -1,0 +1,32 @@
+name: abacus-laravel
+
+services:
+  # The PostgreSQL instance for concurrency & deadlock verification
+  postgres:
+    image: "postgres:16-alpine"
+    container_name: postgres-16
+    restart: unless-stopped
+    ports:
+      # Host Port : Container Port
+      - "54322:5432"
+    environment:
+      POSTGRES_DB: "abacus"
+      POSTGRES_USER: "user"
+      POSTGRES_PASSWORD: "password"
+    volumes:
+      - "postgres_test_data:/var/lib/postgresql/data"
+    networks:
+      - testing-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sail -d laravel_concurrency_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_test_data:
+    driver: local
+
+networks:
+  testing-network:
+    driver: bridge
