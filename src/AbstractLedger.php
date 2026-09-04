@@ -15,6 +15,7 @@ use Faest\Abacus\Data\VoidDraft;
 use Faest\Abacus\Exceptions\IllegalVoidException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
+use Illuminate\Database\Connection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -23,6 +24,8 @@ use LogicException;
 
 abstract class AbstractLedger
 {
+    private ?string $connectionOverride = null;
+
     /**
      * Create a new class instance.
      */
@@ -104,14 +107,14 @@ abstract class AbstractLedger
     {
         $this->setupLockRecords([$draft->ledgerId]);
 
-        return DB::connection()->transaction(fn () => $this->performPost(
+        return $this->conn()->transaction(fn() => $this->performPost(
             $draft,
         ));
     }
 
     public function streamVersion(string $ledgerId): int
     {
-        return DB::connection()->table('ledger_stream_head')->where([
+        return $this->conn()->table('ledger_stream_head')->where([
             'ledger_type' => $this->getLedgerType(),
             'ledger_id' => $ledgerId,
         ])->first()->version ?? 0;
@@ -127,7 +130,7 @@ abstract class AbstractLedger
             $pairs[] = ['ledger_type' => $this->getLedgerType(), 'ledger_id' => $id];
         }
 
-        DB::connection()->table('ledger_stream_head')->insertOrIgnore($pairs);
+        $this->conn()->table('ledger_stream_head')->insertOrIgnore($pairs);
     }
 
     /**
@@ -137,7 +140,7 @@ abstract class AbstractLedger
     {
         sort($ledgerIds);
         foreach ($ledgerIds as $id) {
-            DB::connection()->table('ledger_stream_head')
+            $this->conn()->table('ledger_stream_head')
                 ->where('ledger_type', $this->getLedgerType())
                 ->where('ledger_id', $id)
                 ->lockForUpdate()
@@ -206,7 +209,7 @@ abstract class AbstractLedger
             throw new Exception('Ledgers updates must be made by authenticated actors');
         }
 
-        $newEntry = new LedgerTransaction;
+        $newEntry = new LedgerTransaction();
         $newEntry->entered_by_user_id = (string) $authId;
         $newEntry->recorded_at = now()->toImmutable();
         $newEntry->reverses_transaction_id = $reversesId;
@@ -222,7 +225,7 @@ abstract class AbstractLedger
         $newEntry->stream_version = $nextVersion;
         $newEntry->save();
 
-        DB::connection()->table('ledger_stream_head')->where([
+        $this->conn()->table('ledger_stream_head')->where([
             'ledger_type' => $this->getLedgerType(),
             'ledger_id' => $draft->ledgerId,
         ])->update(['version' => $nextVersion]);
@@ -242,7 +245,7 @@ abstract class AbstractLedger
 
         $this->setupLockRecords([$transactionToReverse->ledger_id]);
 
-        return DB::connection()->transaction(fn () => $this->performPost(
+        return $this->conn()->transaction(fn() => $this->performPost(
             TransactionDraft::make(
                 $transactionToReverse->ledger_id,
                 $this->computeOpposing($payload),
@@ -277,12 +280,22 @@ abstract class AbstractLedger
             ->occurredAt($effectiveAt)
             ->withReason($reason);
 
-        return DB::connection()->transaction(function () use ($source, $dest, $correlationId) {
+        return $this->conn()->transaction(function () use ($source, $dest, $correlationId) {
             $this->lockLedgers([$source->ledgerId, $dest->ledgerId]);
             $sourceResult = $this->performPost($source, correlationId: $correlationId);
             $destResult = $this->performPost($dest, correlationId: $correlationId);
 
             return new LedgerTransferResult($source->correlationId, $sourceResult, $destResult);
         });
+    }
+
+    private function conn(): Connection
+    {
+        return DB::connection($this->connectionOverride);
+    }
+
+    public function overrideConnection(string $connection): void
+    {
+        $this->connectionOverride = $connection;
     }
 }
