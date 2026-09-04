@@ -26,6 +26,8 @@ abstract class AbstractLedger
 {
     private ?string $connectionOverride = null;
 
+    private ?int $lockTimeout = null;
+
     /**
      * Create a new class instance.
      */
@@ -107,7 +109,7 @@ abstract class AbstractLedger
     {
         $this->setupLockRecords([$draft->ledgerId]);
 
-        return $this->conn()->transaction(fn() => $this->performPost(
+        return $this->conn()->transaction(fn () => $this->performPost(
             $draft,
         ));
     }
@@ -139,12 +141,23 @@ abstract class AbstractLedger
     private function lockLedgers(array $ledgerIds): void
     {
         sort($ledgerIds);
+
+        if ($this->lockTimeout) {
+            $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
+        }
+
         foreach ($ledgerIds as $id) {
-            $this->conn()->table('ledger_stream_head')
+            $q = $this->conn()->table('ledger_stream_head')
                 ->where('ledger_type', $this->getLedgerType())
-                ->where('ledger_id', $id)
-                ->lockForUpdate()
-                ->get();
+                ->where('ledger_id', $id);
+
+            if ($this->lockTimeout === 0) {
+                $q = $q->lock('for update nowait');
+            } else {
+                $q = $q->lockForUpdate();
+            }
+
+            $q->get();
         }
     }
 
@@ -209,7 +222,7 @@ abstract class AbstractLedger
             throw new Exception('Ledgers updates must be made by authenticated actors');
         }
 
-        $newEntry = new LedgerTransaction();
+        $newEntry = new LedgerTransaction;
         $newEntry->entered_by_user_id = (string) $authId;
         $newEntry->recorded_at = now()->toImmutable();
         $newEntry->reverses_transaction_id = $reversesId;
@@ -245,7 +258,7 @@ abstract class AbstractLedger
 
         $this->setupLockRecords([$transactionToReverse->ledger_id]);
 
-        return $this->conn()->transaction(fn() => $this->performPost(
+        return $this->conn()->transaction(fn () => $this->performPost(
             TransactionDraft::make(
                 $transactionToReverse->ledger_id,
                 $this->computeOpposing($payload),
@@ -297,5 +310,10 @@ abstract class AbstractLedger
     public function overrideConnection(string $connection): void
     {
         $this->connectionOverride = $connection;
+    }
+
+    public function overrideLockTimeout(?int $timeout): void
+    {
+        $this->lockTimeout = $timeout;
     }
 }
