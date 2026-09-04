@@ -26,8 +26,9 @@ For each stream identified by `(ledger_type, ledger_id)`, Abacus must guarantee:
 4. Each transaction records the stream version assigned to it.
 5. The head version equals the greatest committed transaction version.
 6. Versions never decrease or get reused after a commit.
-7. A rollback restores both the head and transaction state, so a failed write
-   does not leave a version gap.
+7. A rollback restores transaction state and any head advancement, so a failed
+   write does not leave a version gap. A failed first write may leave behind a
+   head at version `0`.
 8. Invariants are evaluated only after the relevant stream heads are locked.
 9. Every multi-stream writer acquires locks in the same global order.
 
@@ -83,15 +84,19 @@ transaction instead of a corrupted stream.
 All posting paths, including `post`, `void`, and `transfer`, must use the same
 protocol.
 
-### 1. Begin or join the transaction
+### 1. Define the transaction boundary
 
-Head creation, locking, invariant evaluation, transaction inserts, head
-updates, and required domain writes must occur in one database transaction.
-This allows a consumer to wrap an Abacus write and its projections or workflow
-records in a larger Laravel `DB::transaction()` call.
+Head locking, invariant evaluation, transaction inserts, head updates, and
+required domain writes must occur in one database transaction. This allows a
+consumer to wrap an Abacus write and its projections or workflow records in a
+larger Laravel `DB::transaction()` call.
 
-Do not create heads before the encompassing transaction. An unsuccessful
-operation should not leave a head behind.
+The package's `setupLockRecords()` step may create missing heads immediately
+before the encompassing write transaction. An unsuccessful operation may
+therefore leave a head at version `0`. This is acceptable: a version-`0` head
+is a permanent coordination record and is functionally equivalent to an absent
+head through the public API. Its presence does not indicate that the stream has
+committed transactions.
 
 ### 2. Canonicalize the affected streams
 
@@ -107,9 +112,10 @@ but does not provide a global order for future cross-type bundles.
 ### 3. Create missing heads safely
 
 For each sorted tuple, issue a database-native insert-or-conflict operation
-inside the transaction. Insert only the identity columns and allow `version`
-to take its default of `0`. On a conflict, the operation may perform a no-op
-update of an identity column, but it must not update `version`.
+before locking the heads. This setup may occur immediately before the write
+transaction and may commit independently. Insert only the identity columns and
+allow `version` to take its default of `0`. On a conflict, the operation may
+perform a no-op update of an identity column, but it must not update `version`.
 
 The current call to Laravel's two-argument `upsert` cannot simply be extended
 with a `version` value. With no explicit update-column list, Laravel uses every
@@ -168,9 +174,10 @@ For each new transaction in a stream:
    that stream by the same operation.
 
 The transaction insert and head update are part of the same database
-transaction. A multi-entry operation may update each head once to its final
-version, provided it assigns consecutive transaction versions in append order
-and keeps the head locks until commit.
+transaction. Head creation need not be part of that transaction. A multi-entry
+operation may update each head once to its final version, provided it assigns
+consecutive transaction versions in append order and keeps the head locks until
+commit.
 
 Do not automatically retry deadlocks or lock timeouts. A safe general retry
 policy requires the idempotency support described by item 4 of the supplement.
@@ -251,11 +258,149 @@ Remove the duplicate history query currently performed before
 `getAggregate()`. The invariant path should perform one replay, under the head
 lock, ordered by `stream_version`.
 
+## Addendum: Prepare, Check, and Append Separation
+
+Use one internal coordinator for the complete write operation. Lower-level
+append code must assume that preparation, locking, optimistic-concurrency
+checks, and invariant evaluation are already complete. In particular, an
+append routine must not create stream heads or acquire additional locks.
+
+The write flow is:
+
+1. Validate the inputs and normalize the affected streams.
+2. Prepare missing stream heads.
+3. Begin or join the database transaction.
+4. Lock every affected head.
+5. Check every expected version.
+6. Rebuild aggregates and plan every append in memory.
+7. Insert the planned transactions and advance their heads.
+
+### Normalize the streams
+
+An internal normalization method should reject negative expected versions,
+extract the affected stream identities, remove duplicates, and return them in
+canonical order. This happens before any database work.
+
+For the current same-ledger-type API, the normalized value may be represented
+as a unique, sorted list of ledger IDs. Code intended for cross-ledger bundles
+must use complete `(ledger_type, ledger_id)` tuples.
+
+### Prepare the heads
+
+An internal preparation method should accept only normalized streams. It
+should create each missing head individually in canonical order using the
+conflict-safe behavior described above. It may run immediately before the
+write transaction and may leave version-`0` heads behind.
+
+Preparation must not read versions, acquire locks, evaluate invariants, or
+insert transactions.
+
+### Lock and read the heads
+
+An internal locking method should run inside the write transaction and accept
+only normalized streams. It should lock each head exactly once, verify that
+every requested head was returned, and return the locked current versions as a
+map keyed by stream identity.
+
+The locking method must not create heads or silently normalize an unordered
+input. Keeping normalization separate makes it difficult for different write
+paths to accidentally use different lock orders.
+
+### Check all expected versions
+
+Check every affected stream's expectation against the locked version map
+before evaluating any invariant or inserting any transaction. A mismatch in
+one stream must prevent work from beginning on every other stream in the
+operation.
+
+An expected version describes the stream head at the beginning of the complete
+operation. When multiple entries in one operation target the same stream,
+their non-null expectations must agree. They do not describe the projected
+version immediately before each individual entry.
+
+### Rebuild and plan in memory
+
+Replay each affected stream once under its head lock. Then process the proposed
+entries in append order without writing them yet:
+
+1. Evaluate the entry's invariant against the stream's current in-memory
+   aggregate.
+2. Apply the accepted payload to that aggregate so a later entry in the same
+   operation observes it.
+3. Increment that stream's in-memory version cursor.
+4. Record the assigned version and transaction metadata in an internal append
+   plan.
+
+Planning every entry before persistence ensures that expected-version and
+invariant failures occur before any immutable transaction insert. The database
+transaction remains the final protection against failures during persistence.
+
+### Persist the plan
+
+The persistence method should insert the planned immutable transactions in
+append order, using their preassigned stream versions. After the inserts, it
+may update each head once to its final planned version. All model and query
+writes must use the same connection that owns the encompassing transaction.
+
+Persistence must not load history, evaluate invariants, check expectations, or
+acquire locks.
+
+### Coordinator shape
+
+Initially, this separation can remain as focused private methods on
+`AbstractLedger`:
+
+```php
+private function normalizeStreams(array $appends): array;
+
+private function prepareStreamHeads(array $streams): void;
+
+private function lockStreamHeads(array $streams): array;
+
+private function assertExpectedVersions(array $appends, array $headVersions): void;
+
+private function planAppends(array $appends, array $headVersions): array;
+
+private function persistAppends(array $plannedAppends): array;
+
+private function writeMany(array $appends): array;
+```
+
+`writeMany()` owns the sequence:
+
+```php
+private function writeMany(array $appends): array
+{
+    $streams = $this->normalizeStreams($appends);
+
+    $this->prepareStreamHeads($streams);
+
+    return $this->conn()->transaction(function () use ($appends, $streams) {
+        $headVersions = $this->lockStreamHeads($streams);
+
+        $this->assertExpectedVersions($appends, $headVersions);
+
+        $plannedAppends = $this->planAppends($appends, $headVersions);
+
+        return $this->persistAppends($plannedAppends);
+    });
+}
+```
+
+`post`, `postMany`, `void`, and `transfer` should only translate their public
+arguments into internal pending appends and delegate to `writeMany()`. Pending
+and planned appends may initially be represented by documented arrays. Small
+internal DTOs are appropriate when they make reversal, adjustment,
+correlation, and assigned-version metadata clearer; they must not become a
+public repository or driver abstraction.
+
 ## Failure Semantics
 
 - A version mismatch throws `UnexpectedStreamVersionException`; it does not
   append, increment, or partially commit another stream in the operation.
-- An invariant failure leaves all head versions and histories unchanged.
+- An invariant failure leaves all histories and existing head versions
+  unchanged. For a previously unknown stream, it may leave a head at version
+  `0`.
 - A duplicate stream-version constraint failure is an internal consistency
   error and rolls back the operation.
 - Database deadlocks and lock timeouts remain database exceptions until an
@@ -282,7 +427,8 @@ lock, ordered by `stream_version`.
 - A `null` expected version appends against the locked current version.
 - An invariant failure leaves the previous head version unchanged.
 - Rolling back an outer domain transaction removes its transactions and head
-  advancement; a newly created head is also rolled back.
+  advancement. A head created during pre-transaction setup may remain at
+  version `0`.
 - A reversal receives the next version in the original transaction's stream.
 
 ### Multi-stream behavior
