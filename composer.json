@@ -75,6 +75,16 @@
         "test:unit": [
             "vendor/bin/pest --parallel"
         ],
+        "docker:up": [
+            "docker compose up -d"
+        ],
+        "docker:down": [
+            "docker compose down"
+        ],
+        "test:pg": [
+            "@docker:up",
+            "DB_CONN=pgsql vendor/bin/pest"
+        ],
         "test": [
             "@analyse",
             "@lint:check",
