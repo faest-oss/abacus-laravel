@@ -16,6 +16,7 @@ readonly class TransactionDraft
         public CarbonInterface $accountingDate,
         public string $reason,
         public string $userId,
+        public ?string $ledgerType = null,
         public ?string $idempotencyKey = null,
         public ?string $correlationId = null,
         public ?int $expectedVersion = null,
@@ -23,11 +24,12 @@ readonly class TransactionDraft
         //
     }
 
-    public static function make(string $ledgerId, LedgerPayload $payload): self
+    public static function make(string $ledgerType, string $ledgerId, LedgerPayload $payload): self
     {
         return new self(
             payload: $payload,
             ledgerId: $ledgerId,
+            ledgerType: $ledgerType,
             eventDate: now(),
             accountingDate: now(),
             reason: '',
@@ -40,6 +42,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $eventDate,
             accountingDate: $this->accountingDate,
             reason: $this->reason,
@@ -55,6 +58,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $this->eventDate,
             accountingDate: $accountingDate,
             reason: $this->reason,
@@ -70,6 +74,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $this->eventDate,
             accountingDate: $this->accountingDate,
             reason: $this->reason,
@@ -85,6 +90,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $this->eventDate,
             accountingDate: $this->accountingDate,
             reason: $reason,
@@ -100,6 +106,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $this->eventDate,
             accountingDate: $this->accountingDate,
             reason: $this->reason,
@@ -115,6 +122,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $this->eventDate,
             accountingDate: $this->accountingDate,
             reason: $this->reason,
@@ -130,6 +138,7 @@ readonly class TransactionDraft
         return new self(
             payload: $this->payload,
             ledgerId: $this->ledgerId,
+            ledgerType: $this->ledgerType,
             eventDate: $this->eventDate,
             accountingDate: $this->accountingDate,
             reason: $this->reason,

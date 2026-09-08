@@ -7,6 +7,7 @@ namespace Faest\Abacus;
 use Carbon\CarbonImmutable;
 use Exception;
 use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Data\Append;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\Transaction;
@@ -355,4 +356,35 @@ abstract class AbstractLedger
     {
         $this->lockTimeout = $timeout;
     }
+
+    /**
+     * @param  array<int, Append>  $appends
+     * @return array<int, array<int, string>>
+     */
+    private function normalizeStreams(array $appends): array
+    {
+        $streams = [];
+        foreach ($appends as $append) {
+            $streams[] = [$append->ledgerType, $append->ledgerId];
+        }
+
+        usort($streams, fn ($a, $b) => $a <=> $b);
+
+        return array_values(array_unique($streams, SORT_REGULAR));
+    }
+
+    /**
+     * @param  array<int, array<int, string>>  $streams
+     */
+    private function prepareStreamHeads(array $streams): void
+    {
+        $pairs = [];
+        foreach ($streams as $stream) {
+            $pairs[] = ['ledger_type' => $stream[0], 'ledger_id' => $stream[1]];
+        }
+
+        $this->conn()->table('ledger_stream_head')->insertOrIgnore($pairs);
+    }
+
+    private function TODO(): void {}
 }
