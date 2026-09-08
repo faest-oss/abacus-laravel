@@ -15,6 +15,10 @@
     cacheDirectory=".phpunit.cache"
     backupStaticProperties="false"
 >
+    <php>
+        <!-- Test-only signing key shared with remote Testbench processes. -->
+        <env name="APP_KEY" value="0123456789abcdef0123456789abcdef"/>
+    </php>
     <testsuites>
         <testsuite name="Arch">
             <file>tests/ArchTest.php</file>

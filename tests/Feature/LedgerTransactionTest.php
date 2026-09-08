@@ -52,17 +52,26 @@ it('does not retain records created by an earlier test', function () {
 });
 
 it('requires a stream head for every ledger transaction', function () {
-    expect(fn () => createLedgerTransaction(createStreamHead: false))
+    // Roll back expected constraint violations without aborting the test transaction.
+    expect(fn () => DB::transaction(fn () => createLedgerTransaction(createStreamHead: false)))
         ->toThrow(QueryException::class);
+
+    $this->assertDatabaseCount('ledger_transaction', 0);
 });
 
 it('does not allow a stream head with transactions to be deleted', function () {
     createLedgerTransaction();
 
-    expect(fn () => DB::table('ledger_stream_head')->where([
+    expect(fn () => DB::transaction(fn () => DB::table('ledger_stream_head')->where([
         'ledger_type' => 'utility-billing',
         'ledger_id' => 'account-123',
-    ])->delete())->toThrow(QueryException::class);
+    ])->delete()))->toThrow(QueryException::class);
+
+    $this->assertDatabaseHas('ledger_stream_head', [
+        'ledger_type' => 'utility-billing',
+        'ledger_id' => 'account-123',
+    ]);
+    $this->assertDatabaseCount('ledger_transaction', 1);
 });
 
 it('prevents a ledger transaction from being updated', function () {
