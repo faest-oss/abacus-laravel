@@ -18,36 +18,35 @@ final readonly class Append
         public CarbonInterface $accountingDate,
         public CarbonInterface $systemDate,
         public string $reason,
-        public string $userId,
+        public string $actor,
         public string $ledgerType,
+        public TransactionDraft $source,
+        public PostingContext $sourceContext,
         public ?int $version = null,
         public ?string $idempotencyKey = null,
         public ?string $correlationId = null,
-        public ?int $reversesId = null,
+        public ?string $reversesId = null,
         public ?int $expectedVersion = null,
     ) {
         //
     }
 
-    public static function makeFromTransactionDraft(TransactionDraft $draft): self
+    public static function make(TransactionDraft $draft, PostingContext $context): self
     {
-
-        $userId = $draft->userId ?? Auth::id();
-        if (! $userId) {
-            throw new Exception('Ledgers updates must be made by authenticated actors');
-        }
-
         return new self(
             payload: $draft->payload,
             ledgerId: $draft->ledgerId,
-            eventDate: $draft->eventDate,
-            accountingDate: $draft->accountingDate,
+            eventDate: $context->eventDate,
+            accountingDate: $context->accountingDate,
             systemDate: now(),
-            reason: $draft->reason,
-            userId: (string) $userId,
+            reason: $context->reason,
+            actor: $context->actor,
             ledgerType: $draft->ledgerType,
-            idempotencyKey: $draft->idempotencyKey,
+            idempotencyKey: $context->idempotencyKey,
+            correlationId: $context->correlationId,
             expectedVersion: $draft->expectedVersion,
+            source: $draft,
+            sourceContext: $context,
         );
     }
 
@@ -60,13 +59,15 @@ final readonly class Append
             accountingDate: $this->accountingDate,
             systemDate: $this->systemDate,
             reason: $this->reason,
-            userId: $this->userId,
+            actor: $this->actor,
             version: $this->version,
             ledgerType: $this->ledgerType,
             idempotencyKey: $this->idempotencyKey,
             expectedVersion: $this->expectedVersion,
             reversesId: $this->reversesId,
             correlationId: $correlationId,
+            source: $this->source,
+            sourceContext: $this->sourceContext,
         );
     }
 
@@ -79,13 +80,15 @@ final readonly class Append
             accountingDate: $this->accountingDate,
             systemDate: $this->systemDate,
             reason: $this->reason,
-            userId: $this->userId,
+            actor: $this->actor,
             version: $this->version,
             idempotencyKey: $this->idempotencyKey,
             ledgerType: $this->ledgerType,
             expectedVersion: $expectedVersion,
             reversesId: $this->reversesId,
             correlationId: $this->correlationId,
+            source: $this->source,
+            sourceContext: $this->sourceContext,
         );
     }
 
@@ -98,13 +101,36 @@ final readonly class Append
             accountingDate: $this->accountingDate,
             systemDate: $this->systemDate,
             reason: $this->reason,
-            userId: $this->userId,
+            actor: $this->actor,
             idempotencyKey: $this->idempotencyKey,
             ledgerType: $this->ledgerType,
             expectedVersion: $this->expectedVersion,
             version: $version,
             reversesId: $this->reversesId,
             correlationId: $this->correlationId,
+            source: $this->source,
+            sourceContext: $this->sourceContext,
+        );
+    }
+
+    public function reverses(?string $reversesId): self
+    {
+        return new self(
+            payload: $this->payload,
+            ledgerId: $this->ledgerId,
+            eventDate: $this->eventDate,
+            accountingDate: $this->accountingDate,
+            systemDate: $this->systemDate,
+            reason: $this->reason,
+            actor: $this->actor,
+            idempotencyKey: $this->idempotencyKey,
+            ledgerType: $this->ledgerType,
+            expectedVersion: $this->expectedVersion,
+            version: $this->version,
+            reversesId: $reversesId,
+            correlationId: $this->correlationId,
+            source: $this->source,
+            sourceContext: $this->sourceContext,
         );
     }
 }

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Faest\Abacus\Exceptions;
 
 use Exception;
-use Faest\Abacus\Data\Append;
 use Faest\Abacus\Data\TransactionDraft;
 use Throwable;
 
@@ -16,7 +15,7 @@ class FailedInvariantException extends Exception
 {
     public function __construct(
         string $message,
-        private Append $failedAppend,
+        private TransactionDraft $failedDraft,
         int $code = 0,
         ?Throwable $previous = null,
     ) {

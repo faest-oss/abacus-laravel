@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Carbon\CarbonImmutable;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
+use Faest\Abacus\Data\PostingContext;
 use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
@@ -29,10 +30,10 @@ beforeEach(function () {
 });
 
 test('posts acquire an exclusive stream head lock', function () {
-    $firstLedger = new SimpleLedger;
+    $firstLedger = new SimpleLedger();
     $firstLedger->overrideConnection('pgsql');
 
-    $secondLedger = new SimpleLedger;
+    $secondLedger = new SimpleLedger();
     $secondLedger->overrideConnection('pgsql2');
     $secondLedger->overrideLockTimeout(0);
 
@@ -44,7 +45,7 @@ test('posts acquire an exclusive stream head lock', function () {
         }
 
         try {
-            $secondLedger->post(stdTrans()->failIfVersionIsnt(0));
+            $secondLedger->post(stdTrans()->failIfVersionIsnt(0), stdContext());
         } catch (QueryException $exception) {
             expect($exception->getCode())->toBe('55P03');
             $lockWasContended = true;
@@ -53,7 +54,7 @@ test('posts acquire an exclusive stream head lock', function () {
 
     $firstLedger->post(stdTrans(
         payload: GenericPayload::make('deposit', ['amount' => 25]),
-    )->failIfVersionIsnt(0));
+    )->failIfVersionIsnt(0), stdContext());
 
     expect($lockWasContended)->toBeTrue();
     assertDatabaseCount('ledger_transaction', 1);
@@ -67,11 +68,12 @@ test('posts acquire an exclusive stream head lock', function () {
 
 test('only one concurrent first post can expect version zero', function () {
     $draft = stdTrans()->failIfVersionIsnt(0);
-    $post = static function () use ($draft): array {
-        $ledger = new SimpleLedger;
+    $context = stdContext();
+    $post = static function () use ($draft, $context): array {
+        $ledger = new SimpleLedger();
 
         try {
-            $transaction = $ledger->post($draft);
+            $transaction = $ledger->post($draft, $context);
 
             return ['outcome' => 'committed', 'version' => $transaction->version];
         } catch (UnexpectedStreamVersionException $exception) {
@@ -99,8 +101,8 @@ test('opposing post many calls acquire stream locks in the same order', function
     $firstDrafts = [stdTrans('account-b'), stdTrans('account-a')];
     $secondDrafts = [stdTrans('account-a'), stdTrans('account-b')];
 
-    $postMany = static function (array $drafts): Closure {
-        return static function () use ($drafts): array {
+    $postMany = static function (array $drafts, PostingContext $context): Closure {
+        return static function () use ($drafts, $context): array {
             $lockOrder = [];
 
             DB::listen(static function ($query) use (&$lockOrder) {
@@ -109,21 +111,23 @@ test('opposing post many calls acquire stream locks in the same order', function
                 }
             });
 
-            $transactions = (new SimpleLedger)->postMany($drafts);
+            $transactions = (new SimpleLedger())->postMany($drafts, $context);
 
             return [
                 'lockOrder' => array_slice($lockOrder, 0, 2),
                 'versions' => array_map(
-                    static fn ($transaction): int => $transaction->version,
+                    static fn($transaction): int => $transaction->version,
                     $transactions,
                 ),
             ];
         };
     };
 
+    $context = stdContext();
+
     $results = TwoProcessHarness::run(
-        $postMany($firstDrafts),
-        $postMany($secondDrafts),
+        $postMany($firstDrafts, $context),
+        $postMany($secondDrafts, $context),
     );
 
     $versions = array_column($results, 'versions');
@@ -152,9 +156,15 @@ function stdTrans(string $ledgerId = '234', ?LedgerPayload $payload = null): Tra
         'amount' => 2,
     ]);
 
-    return TransactionDraft::make($ledgerId, $payload)
-        ->authoredBy('usr-123')
-        ->withReason('paycheck deposit')
-        ->occurredAt(CarbonImmutable::parse('2026-06-01'))
-        ->bookedFor(CarbonImmutable::parse('2026-06-01'));
+    return TransactionDraft::make('cash-account', $ledgerId, $payload);
+}
+
+function stdContext(): PostingContext
+{
+    return new PostingContext(
+        'usr-123',
+        CarbonImmutable::parse('2026-06-01'),
+        CarbonImmutable::parse('2026-06-01'),
+        'paycheck deposit'
+    );
 }
