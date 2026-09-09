@@ -14,7 +14,6 @@ readonly class VoidDraft
         public string $userId,
         public CarbonInterface $eventDate,
         public CarbonInterface $accountingDate,
-        public ?string $correlationId = null,
         public ?int $expectedVersion = null,
     ) {
         //
@@ -39,7 +38,6 @@ readonly class VoidDraft
             accountingDate: $this->accountingDate,
             reason: $this->reason,
             userId: $this->userId,
-            correlationId: $this->correlationId,
             expectedVersion: $this->expectedVersion,
         );
     }
@@ -52,7 +50,6 @@ readonly class VoidDraft
             accountingDate: $accountingDate,
             reason: $this->reason,
             userId: $this->userId,
-            correlationId: $this->correlationId,
             expectedVersion: $this->expectedVersion,
         );
     }
@@ -65,7 +62,6 @@ readonly class VoidDraft
             accountingDate: $this->accountingDate,
             reason: $this->reason,
             userId: $userId,
-            correlationId: $this->correlationId,
             expectedVersion: $this->expectedVersion,
         );
     }
@@ -78,23 +74,10 @@ readonly class VoidDraft
             accountingDate: $this->accountingDate,
             reason: $reason,
             userId: $this->userId,
-            correlationId: $this->correlationId,
             expectedVersion: $this->expectedVersion,
         );
     }
 
-    public function correlateUsing(string $correlationId): self
-    {
-        return new self(
-            transactionId: $this->transactionId,
-            eventDate: $this->eventDate,
-            accountingDate: $this->accountingDate,
-            reason: $this->reason,
-            userId: $this->userId,
-            correlationId: $correlationId,
-            expectedVersion: $this->expectedVersion,
-        );
-    }
 
     public function failIfVersionMismatch(int $expectedVersion): self
     {
@@ -104,7 +87,6 @@ readonly class VoidDraft
             accountingDate: $this->accountingDate,
             reason: $this->reason,
             userId: $this->userId,
-            correlationId: $this->correlationId,
             expectedVersion: $expectedVersion,
         );
     }

@@ -154,7 +154,7 @@ abstract class AbstractLedger
     private function setupLockRecords(array $ledgerIds): void
     {
         $ledgerIds = array_unique($ledgerIds);
-        usort($ledgerIds, fn (string $a, string $b): int => strnatcmp($a, $b));
+        usort($ledgerIds, fn(string $a, string $b): int => strnatcmp($a, $b));
 
         $pairs = [];
         foreach ($ledgerIds as $id) {
@@ -170,7 +170,7 @@ abstract class AbstractLedger
     private function lockLedgers(array $ledgerIds): void
     {
         $ledgerIds = array_unique($ledgerIds);
-        usort($ledgerIds, fn (string $a, string $b): int => strnatcmp($a, $b));
+        usort($ledgerIds, fn(string $a, string $b): int => strnatcmp($a, $b));
 
         if ($this->lockTimeout) {
             $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
@@ -253,7 +253,7 @@ abstract class AbstractLedger
             throw new Exception('Ledgers updates must be made by authenticated actors');
         }
 
-        $newEntry = new LedgerTransaction;
+        $newEntry = new LedgerTransaction();
         $newEntry->setConnection($this->connectionOverride);
         $newEntry->entered_by_user_id = (string) $authId;
         $newEntry->recorded_at = now()->toImmutable();
@@ -290,7 +290,7 @@ abstract class AbstractLedger
 
         $this->setupLockRecords([$transactionToReverse->ledger_id]);
 
-        return $this->conn()->transaction(fn () => $this->performPost(
+        return $this->conn()->transaction(fn() => $this->performPost(
             TransactionDraft::make(
                 $transactionToReverse->ledger_id,
                 $this->computeOpposing($payload),
@@ -365,10 +365,14 @@ abstract class AbstractLedger
     {
         $streams = [];
         foreach ($appends as $append) {
+            if ($append->expectedVersion !== null && $append->expectedVersion < 0) {
+                throw new InvalidArgumentException('Expected version must not be negative');
+            }
+
             $streams[] = [$append->ledgerType, $append->ledgerId];
         }
 
-        usort($streams, fn ($a, $b) => $a <=> $b);
+        usort($streams, fn($a, $b) => $a <=> $b);
 
         return array_values(array_unique($streams, SORT_REGULAR));
     }
@@ -386,5 +390,133 @@ abstract class AbstractLedger
         $this->conn()->table('ledger_stream_head')->insertOrIgnore($pairs);
     }
 
-    private function TODO(): void {}
+    /**
+    * @param array<int, array<int, string>> $streams
+    * @return array<string, array<string, int>>
+    */
+    private function lockStreamHeads(array $streams): array
+    {
+        $heads = [];
+
+        if ($this->lockTimeout) {
+            $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
+        }
+
+        foreach ($streams as $stream) {
+            $q = $this->conn()->table('ledger_stream_head')
+                ->where('ledger_type', $stream[0])
+                ->where('ledger_id', $stream[1]);
+
+            if ($this->lockTimeout === 0) {
+                $q = $q->lock('for update nowait');
+            } else {
+                $q = $q->lockForUpdate();
+            }
+
+            $heads[$stream[0]][$stream[1]] = $q->get()->version;
+        }
+
+        return $heads;
+    }
+
+    /**
+     * @param  array<int, Append>  $appends
+     * @param array<string, array<string, int>> $heads
+     */
+    private function assertExpectedVersions(array $appends, array $heads): void
+    {
+        foreach ($appends as $append) {
+            $currentVersion = $heads[$append->ledgerType][$append->ledgerId];
+
+
+            if ($append->expectedVersion !== null && $append->expectedVersion !== $currentVersion) {
+                throw new UnexpectedStreamVersionException(
+                    'Stream expectation failed',
+                    $append->ledgerType,
+                    $append->ledgerId,
+                    $append->expectedVersion,
+                    $currentVersion,
+                );
+            }
+        }
+    }
+
+    /**
+     * @param  array<int, Append>  $appends
+     * @param array<string, array<string, int>> $heads
+     */
+    private function planAppends(array $appends, array $heads): array
+    {
+        $planned = [];
+
+        foreach ($appends as $append) {
+            $reversesId = $append->reversesId;
+
+            if ($reversesId) {
+                $existingReversal = $this->ledgerTranQuery()
+                    ->where('reverses_transaction_id', $reversesId)
+                    ->first();
+
+                if ($existingReversal) {
+                    throw new Exception('This transaction has already been reversed');
+                }
+            }
+
+            $aggregate = $this->getAggregate($append->ledgerId);
+
+            try {
+                $this->assertInvariants($append->payload, $aggregate);
+            } catch (Exception $e) {
+                throw new FailedInvariantException($e->getMessage(), $append, previous: $e);
+            }
+
+            $currentVersion = $heads[$append->ledgerType][$append->ledgerId];
+            $nextVersion = $currentVersion++;
+
+            $planned[] = $append->withVersion($nextVersion);
+            $heads[$append->ledgerType][$append->ledgerId] = $nextVersion;
+        }
+
+        return $planned;
+    }
+
+    private function persistAppends(array $plannedAppends): array
+    {
+        if (DB::transactionLevel() === 0) {
+            throw new LogicException('Ledger operations must run within a db trannsaction');
+        }
+
+
+
+
+
+        $newEntry = new LedgerTransaction();
+        $newEntry->setConnection($this->connectionOverride);
+        $newEntry->entered_by_user_id = (string) $authId;
+        $newEntry->recorded_at = now()->toImmutable();
+        $newEntry->reverses_transaction_id = $reversesId;
+        $newEntry->adjusts_transaction_id = $adjustsId;
+        $newEntry->correlation_id = $correlationId;
+        $newEntry->payload_type = $this->getPayloadType($draft->payload);
+        $newEntry->ledger_type = $this->getLedgerType();
+        $newEntry->ledger_id = $draft->ledgerId;
+        $newEntry->effective_at = $draft->eventDate->toImmutable();
+        $newEntry->accounting_date = $draft->accountingDate->toImmutable();
+        $newEntry->payload = $draft->payload->jsonSerialize();
+        $newEntry->reason = $draft->reason;
+        $newEntry->stream_version = $nextVersion;
+        $newEntry->save();
+
+        $this->conn()->table('ledger_stream_head')->where([
+            'ledger_type' => $this->getLedgerType(),
+            'ledger_id' => $draft->ledgerId,
+        ])->update(['version' => $nextVersion]);
+
+        return $this->toDto($newEntry);
+    }
+
+    private function writeMany(array $appends): array
+    {
+        //
+    }
 }

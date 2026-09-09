@@ -15,7 +15,7 @@ readonly class TransactionDraft
         public CarbonInterface $eventDate,
         public CarbonInterface $accountingDate,
         public string $reason,
-        public string $userId,
+        public ?string $userId,
         public ?string $ledgerType = null,
         public ?string $idempotencyKey = null,
         public ?string $correlationId = null,
