@@ -22,10 +22,11 @@ use Illuminate\Database\Eloquent\Model;
  * @property ?string $reverses_transaction_id
  * @property ?string $adjusts_transaction_id
  * @property ?string $correlation_id
- * @property CarbonImmutable $effective_at
- * @property CarbonImmutable $recorded_at
+ * @property ?string $idempotency_key
+ * @property CarbonImmutable $event_date
+ * @property CarbonImmutable $system_date
  * @property CarbonImmutable $accounting_date
- * @property string $entered_by_user_id
+ * @property string $actor
  */
 class LedgerTransaction extends Model
 {
@@ -34,19 +35,19 @@ class LedgerTransaction extends Model
 
     use HasUlids;
 
-    public const CREATED_AT = null; // The ledger records its system time in recorded_at.
+    public const CREATED_AT = null; // The ledger records its system time in system_date.
 
     public const UPDATED_AT = null; // Disable standard updated_at.
 
     protected $table = 'ledger_transaction';
 
-    protected $guarded = ['id', 'recorded_at', 'entered_by_user_id'];
+    protected $guarded = ['id', 'system_date', 'actor'];
 
     protected function casts(): array
     {
         return [
-            'recorded_at' => 'immutable_datetime',
-            'effective_at' => 'immutable_datetime',
+            'system_date' => 'immutable_datetime',
+            'event_date' => 'immutable_datetime',
             'accounting_date' => 'immutable_datetime',
             'payload' => 'array',
         ];
@@ -55,7 +56,7 @@ class LedgerTransaction extends Model
     protected static function booted(): void
     {
         // Throw exceptions if any code attempts to mutate the past
-        static::updating(fn () => throw new LedgerImmutableException('Ledger entries cannot be modified.'));
-        static::deleting(fn () => throw new LedgerImmutableException('Ledger entries cannot be deleted.'));
+        static::updating(fn() => throw new LedgerImmutableException('Ledger entries cannot be modified.'));
+        static::deleting(fn() => throw new LedgerImmutableException('Ledger entries cannot be deleted.'));
     }
 }

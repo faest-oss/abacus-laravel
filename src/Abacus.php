@@ -15,8 +15,10 @@ use Faest\Abacus\Data\Transaction;
 use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Data\VoidDraft;
 use Faest\Abacus\Exceptions\FailedInvariantException;
+use Faest\Abacus\Exceptions\IdempotencyConflictException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
+use Faest\Abacus\Support\PayloadFingerprint;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
@@ -415,17 +417,18 @@ final class Abacus
         $completed = [];
 
         foreach ($plannedAppends as $append) {
-            $newEntry = new LedgerTransaction;
+            $newEntry = new LedgerTransaction();
             $newEntry->setConnection($this->connectionOverride);
-            $newEntry->entered_by_user_id = $append->actor;
-            $newEntry->recorded_at = $append->systemDate->toImmutable();
+            $newEntry->actor = $append->actor;
+            $newEntry->system_date = $append->systemDate->toImmutable();
             $newEntry->reverses_transaction_id = $append->reversesId;
             // $newEntry->adjusts_transaction_id = $append->adjustsId;
             $newEntry->correlation_id = $append->correlationId;
+            $newEntry->idempotency_key = $append->idempotencyKey;
             $newEntry->payload_type = $append->payload->payloadType();
             $newEntry->ledger_type = $append->ledgerType;
             $newEntry->ledger_id = $append->ledgerId;
-            $newEntry->effective_at = $append->eventDate->toImmutable();
+            $newEntry->event_date = $append->eventDate->toImmutable();
             $newEntry->accounting_date = $append->accountingDate->toImmutable();
             $newEntry->payload = $append->payload->jsonSerialize();
             $newEntry->reason = $append->reason;
@@ -449,6 +452,12 @@ final class Abacus
      */
     private function writeMany(array $appends): array
     {
+        $replayed = $this->checkIdempotency($appends);
+
+        if ($replayed !== null) {
+            return $replayed;
+        }
+
         $streams = $this->normalizeStreams($appends);
         $this->prepareStreamHeads($streams);
 
@@ -466,5 +475,59 @@ final class Abacus
     private function write(Append $append): Transaction
     {
         return $this->writeMany([$append])[0];
+    }
+
+    /**
+     * @param  array<int, Append>  $appends
+     * @return ?array<int, Transaction>
+     */
+    private function checkIdempotency(array $appends): ?array
+    {
+        // Extract non-null idempotency keys
+        $keys = array_filter(array_map(fn(Append $a) => $a->idempotencyKey, $appends));
+
+        if (empty($keys)) {
+            return null; // No idempotency keys provided, proceed with normal write
+        }
+
+        // Query existing transactions for these keys
+        $existing = $this->ledgerTranQuery()
+            ->whereIn('idempotency_key', $keys)
+            ->orderBy('stream_version', 'asc')
+            ->get();
+
+        if ($existing->isEmpty()) {
+            return null; // First-time write
+        }
+
+        // If key count doesn't match or draft count differs -> conflict
+        if ($existing->count() !== count($appends)) {
+            throw new IdempotencyConflictException(
+                $appends[0]->ledgerType,
+                $keys[0],
+                'Idempotent batch size mismatch.'
+            );
+        }
+
+        // Verify each append matches the existing transaction
+        foreach ($appends as $index => $append) {
+            $tx = $existing[$index];
+
+            $targetMismatch = $tx->ledger_type !== $append->ledgerType
+                || $tx->ledger_id !== $append->ledgerId
+                || $tx->payload_type !== $append->payload->payloadType();
+
+            $payloadMismatch = ! PayloadFingerprint::matches($append->payload, $tx->payload);
+
+            if ($targetMismatch || $payloadMismatch) {
+                throw new IdempotencyConflictException(
+                    $append->ledgerType,
+                    $append->idempotencyKey,
+                );
+            }
+        }
+
+        // Exact replay: map existing records to Transaction DTOs and return
+        return $existing->map(fn(LedgerTransaction $tx) => $this->toDto($tx))->all();
     }
 }

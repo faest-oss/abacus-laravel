@@ -22,10 +22,10 @@ function createLedgerTransaction(bool $createStreamHead = true): LedgerTransacti
     $transaction->ledger_id = 'account-123';
     $transaction->payload = json_encode(['type' => 'charge', 'amount' => 1250], JSON_THROW_ON_ERROR);
     $transaction->payload_type = 'charge';
-    $transaction->effective_at = Carbon::parse('2026-01-15 09:30:00');
-    $transaction->recorded_at = Carbon::parse('2026-01-15 10:00:00');
+    $transaction->event_date = Carbon::parse('2026-01-15 09:30:00');
+    $transaction->system_date = Carbon::parse('2026-01-15 10:00:00');
     $transaction->accounting_date = Carbon::parse('2026-01-15 10:00:00');
-    $transaction->entered_by_user_id = 'user-456';
+    $transaction->actor = 'user-456';
     $transaction->reason = 'testing';
     $transaction->stream_version = 1;
     $transaction->save();

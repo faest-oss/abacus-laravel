@@ -119,6 +119,19 @@ final readonly class PostingContext
         );
     }
 
+    public function withIdempotencyKey(?string $idempotencyKey): self
+    {
+        return new self(
+            actor: $this->actor,
+            eventDate: $this->eventDate,
+            accountingDate: $this->accountingDate,
+            reason: $this->reason,
+            correlationId: $this->correlationId,
+            idempotencyKey: $idempotencyKey,
+            metadata: $this->metadata,
+        );
+    }
+
     public function withEventDate(CarbonInterface $eventDate): self
     {
         return new self(

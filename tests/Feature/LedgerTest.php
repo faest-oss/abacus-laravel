@@ -10,6 +10,7 @@ use Faest\Abacus\Data\PostingContext;
 use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Data\VoidDraft;
 use Faest\Abacus\Exceptions\FailedInvariantException;
+use Faest\Abacus\Exceptions\IdempotencyConflictException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Facades\Abacus;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
@@ -17,12 +18,13 @@ use Faest\Abacus\Tests\TestCase;
 use Illuminate\Support\Str;
 use Workbench\App\Models\User;
 
+use function PHPUnit\Framework\assertSame;
 use function Pest\Laravel\assertDatabaseCount;
 use function Pest\Laravel\assertDatabaseHas;
 use function PHPUnit\Framework\assertEquals;
 
 beforeEach(function () {
-    Abacus::registerLedger(new SimpleLedger);
+    Abacus::registerLedger(new SimpleLedger());
 });
 
 it('posts transactions', function () {
@@ -78,7 +80,7 @@ it('enforces domain invariants', function () {
     $this->travelTo($time);
     $this->assertEquals(0, Abacus::streamVersion('cash-account', standardLedgerId()));
 
-    $overdraft = fn () => Abacus::post(
+    $overdraft = fn() => Abacus::post(
         standardTransaction(
             payload: standardPayload('withdraw', ['amount' => -1]),
         ),
@@ -102,7 +104,7 @@ it('posts multiple transactions - all of or none of', function () {
 
     $draft = standardTransaction();
     $draft2 = standardTransaction(payload: standardPayload('withdraw', ['amount' => -500]));
-    expect(fn () => Abacus::postMany([$draft, $draft2], standardContext()))->toThrow(function (FailedInvariantException $e) use ($draft2) {
+    expect(fn() => Abacus::postMany([$draft, $draft2], standardContext()))->toThrow(function (FailedInvariantException $e) use ($draft2) {
         assertEquals($draft2, $e->getFailedDraft());
     });
 
@@ -166,26 +168,26 @@ it('voids transactions', function () {
     assertDatabaseCount('ledger_transaction', 3);
 
     assertDatabaseHas('ledger_transaction', [
-        'entered_by_user_id' => 'user:usr-123',
-        'recorded_at' => '2026-06-02 00:00:00',
+        'actor' => 'user:usr-123',
+        'system_date' => '2026-06-02 00:00:00',
         'reverses_transaction_id' => null,
         'adjusts_transaction_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
         'ledger_id' => 'acct-123',
-        'effective_at' => '2026-06-01 00:00:00',
+        'event_date' => '2026-06-01 00:00:00',
         'reason' => 'paycheck deposit',
     ]);
 
     assertDatabaseHas('ledger_transaction', [
-        'entered_by_user_id' => 'user:usr-123',
-        'recorded_at' => '2026-06-02 00:00:00',
+        'actor' => 'user:usr-123',
+        'system_date' => '2026-06-02 00:00:00',
         'reverses_transaction_id' => $transaction->id,
         'adjusts_transaction_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
         'ledger_id' => 'acct-123',
-        'effective_at' => '2026-06-02 00:00:00',
+        'event_date' => '2026-06-02 00:00:00',
         'reason' => 'check bounced',
     ]);
 
@@ -220,41 +222,41 @@ it('transfers between ledger ids', function () {
     assertDatabaseCount('ledger_transaction', 3);
 
     assertDatabaseHas('ledger_transaction', [
-        'entered_by_user_id' => 'user:usr-123',
-        'recorded_at' => '2026-06-02 00:00:00',
+        'actor' => 'user:usr-123',
+        'system_date' => '2026-06-02 00:00:00',
         'reverses_transaction_id' => null,
         'adjusts_transaction_id' => null,
         'correlation_id' => null,
         'payload_type' => 'deposit',
         'ledger_type' => 'cash-account',
         'ledger_id' => 'acct-123',
-        'effective_at' => '2026-06-01 00:00:00',
+        'event_date' => '2026-06-01 00:00:00',
         'reason' => 'weekly deposit',
     ]);
 
     assertDatabaseHas('ledger_transaction', [
-        'entered_by_user_id' => 'user:usr-123',
-        'recorded_at' => '2026-06-02 00:00:00',
+        'actor' => 'user:usr-123',
+        'system_date' => '2026-06-02 00:00:00',
         'reverses_transaction_id' => null,
         'adjusts_transaction_id' => null,
         'correlation_id' => $transfer->correlationId,
         'payload_type' => 'transfer',
         'ledger_type' => 'cash-account',
         'ledger_id' => 'acct-123',
-        'effective_at' => '2026-06-02 00:00:00',
+        'event_date' => '2026-06-02 00:00:00',
         'reason' => 'transfer request',
     ]);
 
     assertDatabaseHas('ledger_transaction', [
-        'entered_by_user_id' => 'user:usr-123',
-        'recorded_at' => '2026-06-02 00:00:00',
+        'actor' => 'user:usr-123',
+        'system_date' => '2026-06-02 00:00:00',
         'reverses_transaction_id' => null,
         'adjusts_transaction_id' => null,
         'correlation_id' => $transfer->correlationId,
         'payload_type' => 'transfer',
         'ledger_type' => 'cash-account',
         'ledger_id' => 'acct-201',
-        'effective_at' => '2026-06-02 00:00:00',
+        'event_date' => '2026-06-02 00:00:00',
         'reason' => 'transfer request',
     ]);
 
@@ -310,7 +312,7 @@ it('supports reverseOperation for cascading reversals', function () {
 });
 
 it('rejects negative expected version ids', function () {
-    expect(fn () => Abacus::post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
+    expect(fn() => Abacus::post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
     assertDatabaseCount('ledger_transaction', 0);
 });
 
@@ -353,7 +355,7 @@ test('locking on version zero fails when ledger is not empty', function () {
 
     Abacus::post(standardTransaction(), standardContext()->withReason('paycheck deposit'));
 
-    $secondPost = fn () => Abacus::post(standardTransaction()
+    $secondPost = fn() => Abacus::post(standardTransaction()
         ->failIfVersionIsnt(0), standardContext());
 
     expect($secondPost)->toThrow(function (UnexpectedStreamVersionException $e) {
@@ -367,6 +369,114 @@ test('locking on version zero fails when ledger is not empty', function () {
     assertDatabaseCount('ledger_transaction', 1);
 
     assertDatabaseHas('ledger_transaction', standardDbRecord());
+});
+
+it('allows domain specified idempotency keys', function () {
+    /** @var TestCase $this */
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+
+    Abacus::post(
+        standardTransaction()->failIfVersionIsnt(0),
+        standardContext()
+            ->withReason('paycheck deposit')
+            ->withIdempotencyKey('idempotent')
+    );
+
+    assertDatabaseCount('ledger_transaction', 1);
+    assertDatabaseHas('ledger_transaction', standardDbRecord([
+        'idempotency_key' => 'idempotent',
+    ]));
+});
+
+it('returns the original transaction if idempotency key and payload match', function () {
+    /** @var TestCase $this */
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+
+    $tran1 = Abacus::post(
+        standardTransaction()->failIfVersionIsnt(0),
+        standardContext()
+            ->withReason('paycheck deposit')
+            ->withIdempotencyKey('idempotent')
+    );
+
+    $tran2 = Abacus::post(
+        standardTransaction()->failIfVersionIsnt(0),
+        standardContext()
+            ->withReason('paycheck deposit')
+            ->withIdempotencyKey('idempotent')
+    );
+
+    assertEquals($tran1, $tran2);
+    assertDatabaseCount('ledger_transaction', 1);
+    assertDatabaseHas('ledger_transaction', standardDbRecord([
+        'idempotency_key' => 'idempotent',
+    ]));
+});
+
+it('throws idempotency conflict if payload does not match', function () {
+    /** @var TestCase $this */
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+
+    $context = standardContext()->withIdempotencyKey('idempotent');
+
+    // post original transaction using key
+    Abacus::post(
+        standardTransaction(),
+        $context
+    );
+
+    $alteredPayload = standardPayload(payload: [
+        'amount' => 500,
+    ]);
+
+    expect(
+        fn() => Abacus::post(standardTransaction(payload: $alteredPayload), $context)
+    ) ->toThrow(function (IdempotencyConflictException $e) {
+        assertEquals('idempotent', $e->idempotencyKey);
+        assertEquals('cash-account', $e->ledgerType);
+    });
+
+    assertDatabaseCount('ledger_transaction', 1);
+    assertDatabaseHas('ledger_transaction', standardDbRecord([
+        'idempotency_key' => 'idempotent',
+    ]));
+});
+
+it('throws idempotency conflict if subset of requested transactions have matching idempotency keys', function () {
+    /** @var TestCase $this */
+    $time = CarbonImmutable::parse('2026-06-02');
+    $this->travelTo($time);
+
+    $context = standardContext()->withIdempotencyKey('idempotent');
+
+    // post original transaction using key
+    Abacus::post(
+        standardTransaction(),
+        $context
+    );
+
+
+    expect(
+        fn() => Abacus::postMany(
+            [
+                standardTransaction(),
+                standardTransaction(ledgerId: '5000003'),
+            ],
+            $context
+        )
+    )->toThrow(function (IdempotencyConflictException $e) {
+        assertEquals('Idempotent batch size mismatch.', $e->getMessage());
+        assertEquals('idempotent', $e->idempotencyKey);
+        assertEquals('cash-account', $e->ledgerType);
+    });
+
+    assertDatabaseCount('ledger_transaction', 1);
+    assertDatabaseHas('ledger_transaction', standardDbRecord([
+        'idempotency_key' => 'idempotent',
+    ]));
 });
 
 function standardLedgerId(): string
@@ -408,15 +518,15 @@ function standardDbRecord(array $record = []): array
 {
     return array_merge(
         [
-            'entered_by_user_id' => 'user:usr-123',
-            'recorded_at' => '2026-06-02 00:00:00',
+            'actor' => 'user:usr-123',
+            'system_date' => '2026-06-02 00:00:00',
             'reverses_transaction_id' => null,
             'adjusts_transaction_id' => null,
             'correlation_id' => null,
             'payload_type' => 'deposit',
             'ledger_type' => 'cash-account',
             'ledger_id' => '234',
-            'effective_at' => '2026-06-01 00:00:00',
+            'event_date' => '2026-06-01 00:00:00',
             'accounting_date' => '2026-06-01 00:00:00',
             'reason' => 'paycheck deposit',
             'stream_version' => 1,
@@ -427,7 +537,7 @@ function standardDbRecord(array $record = []): array
 
 function fakeUser(): User
 {
-    $user = new User;
+    $user = new User();
     $user->forceFill(['id' => '89']);
 
     return $user;

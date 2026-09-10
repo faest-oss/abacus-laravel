@@ -29,12 +29,14 @@ return new class extends Migration
             $table->foreignUlidFor(LedgerTransaction::class, 'reverses_transaction_id')->nullable(true);
             $table->foreignUlidFor(LedgerTransaction::class, 'adjusts_transaction_id')->nullable(true);
             $table->uuid('correlation_id')->nullable(true);
-            $table->timestamp('effective_at');
-            $table->timestamp('recorded_at');
+            $table->string('idempotency_key')->nullable(true);
+            $table->timestamp('event_date');
+            $table->timestamp('system_date');
             $table->timestamp('accounting_date');
-            $table->string('entered_by_user_id');
+            $table->string('actor');
 
             $table->unique(['ledger_type', 'ledger_id', 'stream_version']);
+            $table->unique(['ledger_type', 'idempotency_key']);
             $table->foreign(['ledger_type', 'ledger_id'])
                 ->references(['ledger_type', 'ledger_id'])
                 ->on('ledger_stream_head')
