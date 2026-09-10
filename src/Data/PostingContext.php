@@ -8,11 +8,12 @@ use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 
 final readonly class PostingContext
 {
     /**
-     * @param array<mixed> $metadata
+     * @param  array<mixed>  $metadata
      */
     public function __construct(
         public string $actor,
@@ -38,7 +39,7 @@ final readonly class PostingContext
         $resolvedUser = $userId ?? Auth::id();
 
         if (! $resolvedUser) {
-            throw new \InvalidArgumentException('A valid user ID or active authentication session is required.');
+            throw new InvalidArgumentException('A valid user ID or active authentication session is required.');
         }
 
         $now = CarbonImmutable::now();
@@ -48,13 +49,13 @@ final readonly class PostingContext
             eventDate: $eventDate ? CarbonImmutable::instance($eventDate) : $now,
             accountingDate: $accountingDate ? CarbonImmutable::instance($accountingDate) : $now,
             reason: $reason,
-            correlationId: (string) Str::orderedUuid(),
+            correlationId: null,
         );
     }
 
     /**
-    * Context for automated processes, scheduled jobs, or CLI commands.
-    */
+     * Context for automated processes, scheduled jobs, or CLI commands.
+     */
     public static function forProcess(
         string $processName,
         CarbonInterface $eventDate,
@@ -67,7 +68,7 @@ final readonly class PostingContext
             eventDate: CarbonImmutable::instance($eventDate),
             accountingDate: CarbonImmutable::instance($accountingDate),
             reason: $reason,
-            correlationId: (string) Str::orderedUuid(),
+            correlationId: null,
             idempotencyKey: $idempotencyKey,
         );
     }

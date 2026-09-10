@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
+use Faest\Abacus\Abacus;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\PostingContext;
@@ -30,29 +31,29 @@ beforeEach(function () {
 });
 
 test('posts acquire an exclusive stream head lock', function () {
-    $firstLedger = new SimpleLedger();
-    $firstLedger->overrideConnection('pgsql');
+    $firstAbacus = (new Abacus)->registerLedger(new SimpleLedger);
+    $firstAbacus->overrideConnection('pgsql');
 
-    $secondLedger = new SimpleLedger();
-    $secondLedger->overrideConnection('pgsql2');
-    $secondLedger->overrideLockTimeout(0);
+    $secondAbacus = (new Abacus)->registerLedger(new SimpleLedger);
+    $secondAbacus->overrideConnection('pgsql2');
+    $secondAbacus->overrideLockTimeout(0);
 
     $lockWasContended = false;
 
-    DB::connection('pgsql')->listen(function ($query) use ($secondLedger, &$lockWasContended) {
+    DB::connection('pgsql')->listen(function ($query) use ($secondAbacus, &$lockWasContended) {
         if (! str_contains(strtolower($query->sql), 'for update')) {
             return;
         }
 
         try {
-            $secondLedger->post(stdTrans()->failIfVersionIsnt(0), stdContext());
+            $secondAbacus->post(stdTrans()->failIfVersionIsnt(0), stdContext());
         } catch (QueryException $exception) {
             expect($exception->getCode())->toBe('55P03');
             $lockWasContended = true;
         }
     });
 
-    $firstLedger->post(stdTrans(
+    $firstAbacus->post(stdTrans(
         payload: GenericPayload::make('deposit', ['amount' => 25]),
     )->failIfVersionIsnt(0), stdContext());
 
@@ -70,10 +71,10 @@ test('only one concurrent first post can expect version zero', function () {
     $draft = stdTrans()->failIfVersionIsnt(0);
     $context = stdContext();
     $post = static function () use ($draft, $context): array {
-        $ledger = new SimpleLedger();
+        $abacus = (new Abacus)->registerLedger(new SimpleLedger);
 
         try {
-            $transaction = $ledger->post($draft, $context);
+            $transaction = $abacus->post($draft, $context);
 
             return ['outcome' => 'committed', 'version' => $transaction->version];
         } catch (UnexpectedStreamVersionException $exception) {
@@ -111,12 +112,12 @@ test('opposing post many calls acquire stream locks in the same order', function
                 }
             });
 
-            $transactions = (new SimpleLedger())->postMany($drafts, $context);
+            $transactions = (new Abacus)->registerLedger(new SimpleLedger)->postMany($drafts, $context);
 
             return [
                 'lockOrder' => array_slice($lockOrder, 0, 2),
                 'versions' => array_map(
-                    static fn($transaction): int => $transaction->version,
+                    static fn ($transaction): int => $transaction->version,
                     $transactions,
                 ),
             ];
@@ -165,6 +166,6 @@ function stdContext(): PostingContext
         'usr-123',
         CarbonImmutable::parse('2026-06-01'),
         CarbonImmutable::parse('2026-06-01'),
-        'paycheck deposit'
+        'paycheck deposit',
     );
 }

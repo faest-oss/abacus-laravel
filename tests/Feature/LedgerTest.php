@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
+use Faest\Abacus\BundleBuilder;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\PostingContext;
@@ -10,6 +11,7 @@ use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Data\VoidDraft;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
+use Faest\Abacus\Facades\Abacus;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
 use Faest\Abacus\Tests\TestCase;
 use Illuminate\Support\Str;
@@ -19,17 +21,18 @@ use function Pest\Laravel\assertDatabaseCount;
 use function Pest\Laravel\assertDatabaseHas;
 use function PHPUnit\Framework\assertEquals;
 
+beforeEach(function () {
+    Abacus::registerLedger(new SimpleLedger);
+});
+
 it('posts transactions', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     assertDatabaseCount('ledger_transaction', 0);
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
 
-
     $draft = standardTransaction();
-    $result = $ledger->post($draft, standardContext());
+    $result = Abacus::post($draft, standardContext());
 
     $this->assertEquals(1, $result->version);
     assertDatabaseCount('ledger_transaction', 1);
@@ -40,8 +43,6 @@ it('posts transactions', function () {
 
 it('posts multiple transactions', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     assertDatabaseCount('ledger_transaction', 0);
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
@@ -49,7 +50,7 @@ it('posts multiple transactions', function () {
     $draft = standardTransaction(payload: standardPayload(payload: ['amount' => 1]));
     $draft2 = standardTransaction(payload: standardPayload(payload: ['amount' => -1]));
     $correlationId = Str::uuid()->toString();
-    $results = $ledger->postMany([$draft, $draft2], standardContext()->withCorrelationId($correlationId));
+    $results = Abacus::postMany([$draft, $draft2], standardContext()->withCorrelationId($correlationId));
 
     $this->assertEquals(2, count($results));
     $this->assertNotEquals($results[0]->id, $results[1]->id);
@@ -72,24 +73,22 @@ it('posts multiple transactions', function () {
 
 it('enforces domain invariants', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     assertDatabaseCount('ledger_transaction', 0);
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
-    $this->assertEquals(0, $ledger->streamVersion(standardLedgerId()));
+    $this->assertEquals(0, Abacus::streamVersion('cash-account', standardLedgerId()));
 
-    $overdraft = fn() => $ledger->post(
+    $overdraft = fn () => Abacus::post(
         standardTransaction(
-            payload: standardPayload('withdraw', ['amount' => -1])
+            payload: standardPayload('withdraw', ['amount' => -1]),
         ),
-        standardContext()
+        standardContext(),
     );
 
     expect($overdraft)
         ->toThrow(Exception::class, 'Cannot be negative');
 
-    $this->assertEquals(0, $ledger->streamVersion(standardLedgerId()));
+    $this->assertEquals(0, Abacus::streamVersion('cash-account', standardLedgerId()));
 
     assertDatabaseCount('ledger_transaction', 0);
     assertDatabaseCount('ledger_stream_head', 1);
@@ -97,15 +96,13 @@ it('enforces domain invariants', function () {
 
 it('posts multiple transactions - all of or none of', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     assertDatabaseCount('ledger_transaction', 0);
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
 
     $draft = standardTransaction();
     $draft2 = standardTransaction(payload: standardPayload('withdraw', ['amount' => -500]));
-    expect(fn() => $ledger->postMany([$draft, $draft2], standardContext()))->toThrow(function (FailedInvariantException $e) use ($draft2) {
+    expect(fn () => Abacus::postMany([$draft, $draft2], standardContext()))->toThrow(function (FailedInvariantException $e) use ($draft2) {
         assertEquals($draft2, $e->getFailedDraft());
     });
 
@@ -114,60 +111,56 @@ it('posts multiple transactions - all of or none of', function () {
 
 it('calculates aggregates', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     $this->actingAs(fakeUser());
 
-    $ledger->post(
+    Abacus::post(
         TransactionDraft::make('cash-account', 'acct-123', GenericPayload::make('deposit', [
             'amount' => 1,
         ])),
         standardContext(),
     );
 
-    $ledger->post(
+    Abacus::post(
         TransactionDraft::make('cash-account', 'acct-123', GenericPayload::make('deposit', [
             'amount' => 5,
         ])),
-        standardContext()
+        standardContext(),
     );
 
-    $ledger->post(
+    Abacus::post(
         TransactionDraft::make('cash-account', 'acct-123', GenericPayload::make('withdraw', [
             'amount' => -4,
         ])),
-        standardContext()->withReason('withdrawal')
+        standardContext()->withReason('withdrawal'),
     );
 
-    $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-123'));
+    $this->assertEquals(['total' => 2], Abacus::getAggregate('cash-account', 'acct-123'));
 });
 
 it('voids transactions', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
 
-    $ledger->post(
+    Abacus::post(
         TransactionDraft::make('cash-account', 'acct-123', GenericPayload::make('deposit', [
             'amount' => 2,
         ])),
-        standardContext()
+        standardContext(),
     );
 
-    $transaction = $ledger->post(
+    $transaction = Abacus::post(
         TransactionDraft::make('cash-account', 'acct-123', GenericPayload::make('deposit', [
             'amount' => 2,
         ])),
-        standardContext()
+        standardContext(),
     );
 
     $this->travel('1 day');
 
-    $ledger->void(
+    Abacus::void(
         VoidDraft::make($transaction->id),
-        standardContext()->withReason('check bounced')->withEventDate(CarbonImmutable::parse('2026-06-02'))
+        standardContext()->withReason('check bounced')->withEventDate(CarbonImmutable::parse('2026-06-02')),
     );
 
     assertDatabaseCount('ledger_transaction', 3);
@@ -196,33 +189,32 @@ it('voids transactions', function () {
         'reason' => 'check bounced',
     ]);
 
-    $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-123'));
+    $this->assertEquals(['total' => 2], Abacus::getAggregate('cash-account', 'acct-123'));
 });
 
 it('transfers between ledger ids', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
     $this->actingAs(fakeUser());
 
-    $transaction = $ledger->post(
+    Abacus::post(
         TransactionDraft::make('cash-account', 'acct-123', GenericPayload::make('deposit', [
             'amount' => 5,
         ])),
-        standardContext()->withReason('weekly deposit')
+        standardContext()->withReason('weekly deposit'),
     );
 
     $sourceTransfer = GenericPayload::make('transfer', ['amount' => -2]);
 
-    $transfer = $ledger->transfer(
-        $sourceTransfer,
-        'acct-123',
-        'acct-201',
-        standardContext()
+    $transfer = Abacus::transfer(
+        payload: $sourceTransfer,
+        sourceLedgerId: 'acct-123',
+        destinationLedgerId: 'acct-201',
+        ledgerType: 'cash-account',
+        context: standardContext()
             ->withReason('transfer request')
-            ->withEventDate(CarbonImmutable::parse('2026-06-02'))
+            ->withEventDate(CarbonImmutable::parse('2026-06-02')),
     );
 
     assertDatabaseCount('ledger_transaction', 3);
@@ -266,46 +258,87 @@ it('transfers between ledger ids', function () {
         'reason' => 'transfer request',
     ]);
 
-    $this->assertEquals(['total' => 3], $ledger->getAggregate('acct-123'));
-    $this->assertEquals(['total' => 2], $ledger->getAggregate('acct-201'));
+    $this->assertEquals(['total' => 3], Abacus::getAggregate('cash-account', 'acct-123'));
+    $this->assertEquals(['total' => 2], Abacus::getAggregate('cash-account', 'acct-201'));
+});
+
+it('supports bundle builder staging across streams', function () {
+    /** @var TestCase $this */
+    $context = standardContext()->withReason('monthly bundle');
+
+    $results = Abacus::bundle($context, function (BundleBuilder $bundle) {
+        $bundle->post('cash-account', 'acct-1', GenericPayload::make('deposit', ['amount' => 10]));
+        $bundle->post('cash-account', 'acct-2', GenericPayload::make('deposit', ['amount' => 20]));
+    });
+
+    $this->assertCount(2, $results);
+    assertDatabaseCount('ledger_transaction', 2);
+    $this->assertEquals(['total' => 10], Abacus::getAggregate('cash-account', 'acct-1'));
+    $this->assertEquals(['total' => 20], Abacus::getAggregate('cash-account', 'acct-2'));
+});
+
+it('supports reverseOperation for cascading reversals', function () {
+    /** @var TestCase $this */
+    Abacus::post(
+        TransactionDraft::make('cash-account', 'acct-source', GenericPayload::make('deposit', ['amount' => 50])),
+        standardContext(),
+    );
+    Abacus::post(
+        TransactionDraft::make('cash-account', 'acct-dest', GenericPayload::make('deposit', ['amount' => 50])),
+        standardContext(),
+    );
+
+    $transfer = Abacus::transfer(
+        payload: GenericPayload::make('transfer', ['amount' => -15]),
+        sourceLedgerId: 'acct-source',
+        destinationLedgerId: 'acct-dest',
+        ledgerType: 'cash-account',
+        context: standardContext()->withReason('initial transfer'),
+    );
+
+    assertDatabaseCount('ledger_transaction', 4);
+    $this->assertEquals(['total' => 35], Abacus::getAggregate('cash-account', 'acct-source'));
+    $this->assertEquals(['total' => 65], Abacus::getAggregate('cash-account', 'acct-dest'));
+
+    // Reverse the whole operation by correlation ID
+    $reversals = Abacus::reverseOperation($transfer->correlationId, standardContext()->withReason('reversing transfer'));
+
+    $this->assertCount(2, $reversals);
+    assertDatabaseCount('ledger_transaction', 6);
+    $this->assertEquals(['total' => 50], Abacus::getAggregate('cash-account', 'acct-source'));
+    $this->assertEquals(['total' => 50], Abacus::getAggregate('cash-account', 'acct-dest'));
 });
 
 it('rejects negative expected version ids', function () {
-    $ledger = new SimpleLedger();
-
-    expect(fn() => $ledger->post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
+    expect(fn () => Abacus::post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
     assertDatabaseCount('ledger_transaction', 0);
 });
 
 test('stream version is zero when stream is empty', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-    $this->assertEquals(0, $ledger->streamVersion('234'));
+    $this->assertEquals(0, Abacus::streamVersion('cash-account', '234'));
 });
 
 test('stream version increments', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
-
-    $transaction = $ledger->post(
+    Abacus::post(
         TransactionDraft::make('cash-account', '234', GenericPayload::make('deposit', [
             'amount' => 2,
         ])),
-        standardContext()
+        standardContext(),
     );
 
-    $this->assertEquals(1, $ledger->streamVersion('234'));
+    $this->assertEquals(1, Abacus::streamVersion('cash-account', '234'));
 });
 
 test('locking on version zero works when ledger is empty', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
 
-    $this->assertEquals(0, $ledger->streamVersion('234'));
+    $this->assertEquals(0, Abacus::streamVersion('cash-account', '234'));
 
-    $transaction = $ledger->post(standardTransaction()
+    Abacus::post(standardTransaction()
         ->failIfVersionIsnt(0), standardContext()->withReason('paycheck deposit'));
 
     assertDatabaseHas('ledger_transaction', standardDbRecord());
@@ -313,15 +346,14 @@ test('locking on version zero works when ledger is empty', function () {
 
 test('locking on version zero fails when ledger is not empty', function () {
     /** @var TestCase $this */
-    $ledger = new SimpleLedger();
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
 
-    $this->assertEquals(0, $ledger->streamVersion('234'));
+    $this->assertEquals(0, Abacus::streamVersion('cash-account', '234'));
 
-    $ledger->post(standardTransaction(), standardContext()->withReason('paycheck deposit'));
+    Abacus::post(standardTransaction(), standardContext()->withReason('paycheck deposit'));
 
-    $secondPost = fn() => $ledger->post(standardTransaction()
+    $secondPost = fn () => Abacus::post(standardTransaction()
         ->failIfVersionIsnt(0), standardContext());
 
     expect($secondPost)->toThrow(function (UnexpectedStreamVersionException $e) {
@@ -395,7 +427,7 @@ function standardDbRecord(array $record = []): array
 
 function fakeUser(): User
 {
-    $user = new User();
+    $user = new User;
     $user->forceFill(['id' => '89']);
 
     return $user;

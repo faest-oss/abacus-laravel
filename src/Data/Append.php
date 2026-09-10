@@ -5,9 +5,7 @@ declare(strict_types=1);
 namespace Faest\Abacus\Data;
 
 use Carbon\CarbonInterface;
-use Exception;
 use Faest\Abacus\Contracts\LedgerPayload;
-use Illuminate\Support\Facades\Auth;
 
 final readonly class Append
 {
@@ -45,6 +43,7 @@ final readonly class Append
             idempotencyKey: $context->idempotencyKey,
             correlationId: $context->correlationId,
             expectedVersion: $draft->expectedVersion,
+            reversesId: $draft->reversesId,
             source: $draft,
             sourceContext: $context,
         );

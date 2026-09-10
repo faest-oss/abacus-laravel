@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace Faest\Abacus\Tests\Fixtures;
 
 use Exception;
-use Faest\Abacus\AbstractLedger;
+use Faest\Abacus\Contracts\Ledger;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use JsonSerializable;
 
-final class SimpleLedger extends AbstractLedger
+final class SimpleLedger implements Ledger
 {
     /**
      * @return array{total: int}
@@ -82,5 +82,13 @@ final class SimpleLedger extends AbstractLedger
         $newPayload['amount'] = -1 * $newPayload['amount'];
 
         return GenericPayload::make($payload->payloadType(), $newPayload);
+    }
+
+    /**
+     * @param  array<mixed>  $payload
+     */
+    public function deserialize(string $eventType, array $payload): LedgerPayload
+    {
+        return GenericPayload::make($eventType, $payload);
     }
 }
