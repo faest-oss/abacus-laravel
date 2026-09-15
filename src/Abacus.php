@@ -11,9 +11,9 @@ use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\Append;
 use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\PostingContext;
+use Faest\Abacus\Data\ReversalDraft;
 use Faest\Abacus\Data\Transaction;
 use Faest\Abacus\Data\TransactionDraft;
-use Faest\Abacus\Data\VoidDraft;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IdempotencyConflictException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
@@ -160,7 +160,7 @@ final class Abacus
         return $head ? (int) $head->version : 0;
     }
 
-    public function void(VoidDraft $draft, ?PostingContext $context = null): Transaction
+    public function postReversal(ReversalDraft $draft, ?PostingContext $context = null): Transaction
     {
         $context ??= PostingContext::forUser();
         $transactionToReverse = $this->ledgerTranQuery()->findSole($draft->transactionId);
@@ -182,7 +182,7 @@ final class Abacus
 
     public function reverse(string $transactionId, ?PostingContext $context = null): Transaction
     {
-        return $this->void(VoidDraft::make($transactionId), $context);
+        return $this->postReversal(ReversalDraft::make($transactionId), $context);
     }
 
     /**
@@ -417,7 +417,7 @@ final class Abacus
         $completed = [];
 
         foreach ($plannedAppends as $append) {
-            $newEntry = new LedgerTransaction();
+            $newEntry = new LedgerTransaction;
             $newEntry->setConnection($this->connectionOverride);
             $newEntry->actor = $append->actor;
             $newEntry->system_date = $append->systemDate->toImmutable();
@@ -484,7 +484,7 @@ final class Abacus
     private function checkIdempotency(array $appends): ?array
     {
         // Extract non-null idempotency keys
-        $keys = array_filter(array_map(fn(Append $a) => $a->idempotencyKey, $appends));
+        $keys = array_filter(array_map(fn (Append $a) => $a->idempotencyKey, $appends));
 
         if (empty($keys)) {
             return null; // No idempotency keys provided, proceed with normal write
@@ -505,7 +505,7 @@ final class Abacus
             throw new IdempotencyConflictException(
                 $appends[0]->ledgerType,
                 $keys[0],
-                'Idempotent batch size mismatch.'
+                'Idempotent batch size mismatch.',
             );
         }
 
@@ -528,6 +528,6 @@ final class Abacus
         }
 
         // Exact replay: map existing records to Transaction DTOs and return
-        return $existing->map(fn(LedgerTransaction $tx) => $this->toDto($tx))->all();
+        return $existing->map(fn (LedgerTransaction $tx) => $this->toDto($tx))->all();
     }
 }

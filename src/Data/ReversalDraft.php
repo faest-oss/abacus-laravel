@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Faest\Abacus\Data;
 
-readonly class VoidDraft
+readonly class ReversalDraft
 {
     public function __construct(
         public string $transactionId,

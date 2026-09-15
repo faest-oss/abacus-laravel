@@ -7,8 +7,8 @@ use Faest\Abacus\BundleBuilder;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\PostingContext;
+use Faest\Abacus\Data\ReversalDraft;
 use Faest\Abacus\Data\TransactionDraft;
-use Faest\Abacus\Data\VoidDraft;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IdempotencyConflictException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
@@ -18,13 +18,12 @@ use Faest\Abacus\Tests\TestCase;
 use Illuminate\Support\Str;
 use Workbench\App\Models\User;
 
-use function PHPUnit\Framework\assertSame;
 use function Pest\Laravel\assertDatabaseCount;
 use function Pest\Laravel\assertDatabaseHas;
 use function PHPUnit\Framework\assertEquals;
 
 beforeEach(function () {
-    Abacus::registerLedger(new SimpleLedger());
+    Abacus::registerLedger(new SimpleLedger);
 });
 
 it('posts transactions', function () {
@@ -80,7 +79,7 @@ it('enforces domain invariants', function () {
     $this->travelTo($time);
     $this->assertEquals(0, Abacus::streamVersion('cash-account', standardLedgerId()));
 
-    $overdraft = fn() => Abacus::post(
+    $overdraft = fn () => Abacus::post(
         standardTransaction(
             payload: standardPayload('withdraw', ['amount' => -1]),
         ),
@@ -104,7 +103,7 @@ it('posts multiple transactions - all of or none of', function () {
 
     $draft = standardTransaction();
     $draft2 = standardTransaction(payload: standardPayload('withdraw', ['amount' => -500]));
-    expect(fn() => Abacus::postMany([$draft, $draft2], standardContext()))->toThrow(function (FailedInvariantException $e) use ($draft2) {
+    expect(fn () => Abacus::postMany([$draft, $draft2], standardContext()))->toThrow(function (FailedInvariantException $e) use ($draft2) {
         assertEquals($draft2, $e->getFailedDraft());
     });
 
@@ -139,7 +138,7 @@ it('calculates aggregates', function () {
     $this->assertEquals(['total' => 2], Abacus::getAggregate('cash-account', 'acct-123'));
 });
 
-it('voids transactions', function () {
+it('reverses transactions', function () {
     /** @var TestCase $this */
     $time = CarbonImmutable::parse('2026-06-02');
     $this->travelTo($time);
@@ -160,8 +159,8 @@ it('voids transactions', function () {
 
     $this->travel('1 day');
 
-    Abacus::void(
-        VoidDraft::make($transaction->id),
+    Abacus::postReversal(
+        ReversalDraft::make($transaction->id),
         standardContext()->withReason('check bounced')->withEventDate(CarbonImmutable::parse('2026-06-02')),
     );
 
@@ -312,7 +311,7 @@ it('supports reverseOperation for cascading reversals', function () {
 });
 
 it('rejects negative expected version ids', function () {
-    expect(fn() => Abacus::post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
+    expect(fn () => Abacus::post(standardTransaction()->failIfVersionIsnt(-1)))->toThrow(InvalidArgumentException::class);
     assertDatabaseCount('ledger_transaction', 0);
 });
 
@@ -355,7 +354,7 @@ test('locking on version zero fails when ledger is not empty', function () {
 
     Abacus::post(standardTransaction(), standardContext()->withReason('paycheck deposit'));
 
-    $secondPost = fn() => Abacus::post(standardTransaction()
+    $secondPost = fn () => Abacus::post(standardTransaction()
         ->failIfVersionIsnt(0), standardContext());
 
     expect($secondPost)->toThrow(function (UnexpectedStreamVersionException $e) {
@@ -380,7 +379,7 @@ it('allows domain specified idempotency keys', function () {
         standardTransaction()->failIfVersionIsnt(0),
         standardContext()
             ->withReason('paycheck deposit')
-            ->withIdempotencyKey('idempotent')
+            ->withIdempotencyKey('idempotent'),
     );
 
     assertDatabaseCount('ledger_transaction', 1);
@@ -398,14 +397,14 @@ it('returns the original transaction if idempotency key and payload match', func
         standardTransaction()->failIfVersionIsnt(0),
         standardContext()
             ->withReason('paycheck deposit')
-            ->withIdempotencyKey('idempotent')
+            ->withIdempotencyKey('idempotent'),
     );
 
     $tran2 = Abacus::post(
         standardTransaction()->failIfVersionIsnt(0),
         standardContext()
             ->withReason('paycheck deposit')
-            ->withIdempotencyKey('idempotent')
+            ->withIdempotencyKey('idempotent'),
     );
 
     assertEquals($tran1, $tran2);
@@ -425,7 +424,7 @@ it('throws idempotency conflict if payload does not match', function () {
     // post original transaction using key
     Abacus::post(
         standardTransaction(),
-        $context
+        $context,
     );
 
     $alteredPayload = standardPayload(payload: [
@@ -433,8 +432,8 @@ it('throws idempotency conflict if payload does not match', function () {
     ]);
 
     expect(
-        fn() => Abacus::post(standardTransaction(payload: $alteredPayload), $context)
-    ) ->toThrow(function (IdempotencyConflictException $e) {
+        fn () => Abacus::post(standardTransaction(payload: $alteredPayload), $context),
+    )->toThrow(function (IdempotencyConflictException $e) {
         assertEquals('idempotent', $e->idempotencyKey);
         assertEquals('cash-account', $e->ledgerType);
     });
@@ -455,18 +454,17 @@ it('throws idempotency conflict if subset of requested transactions have matchin
     // post original transaction using key
     Abacus::post(
         standardTransaction(),
-        $context
+        $context,
     );
 
-
     expect(
-        fn() => Abacus::postMany(
+        fn () => Abacus::postMany(
             [
                 standardTransaction(),
                 standardTransaction(ledgerId: '5000003'),
             ],
-            $context
-        )
+            $context,
+        ),
     )->toThrow(function (IdempotencyConflictException $e) {
         assertEquals('Idempotent batch size mismatch.', $e->getMessage());
         assertEquals('idempotent', $e->idempotencyKey);
@@ -537,7 +535,7 @@ function standardDbRecord(array $record = []): array
 
 function fakeUser(): User
 {
-    $user = new User();
+    $user = new User;
     $user->forceFill(['id' => '89']);
 
     return $user;

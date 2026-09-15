@@ -17,7 +17,7 @@ class IdempotencyConflictException extends Exception
         string $message = '',
     ) {
         parent::__construct(
-            $message ?: "Idempotency key '{$idempotencyKey}' was already used with different payload or stream target on ledger '{$ledgerType}'."
+            $message ?: "Idempotency key '{$idempotencyKey}' was already used with different payload or stream target on ledger '{$ledgerType}'.",
         );
     }
 }

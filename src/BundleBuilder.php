@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Faest\Abacus;
 
 use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Data\ReversalDraft;
 use Faest\Abacus\Data\TransactionDraft;
-use Faest\Abacus\Data\VoidDraft;
 use InvalidArgumentException;
 
 class BundleBuilder
@@ -70,7 +70,7 @@ class BundleBuilder
         return $this;
     }
 
-    public function void(VoidDraft $draft): self
+    public function postReversal(ReversalDraft $draft): self
     {
         return $this->reverse($draft->transactionId, $draft->expectedVersion);
     }
