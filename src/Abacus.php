@@ -16,6 +16,7 @@ use Faest\Abacus\Data\Transaction;
 use Faest\Abacus\Data\TransactionDraft;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IdempotencyConflictException;
+use Faest\Abacus\Exceptions\InvalidReversalException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\Support\PayloadFingerprint;
@@ -366,6 +367,14 @@ final class Abacus
             $reversesId = $append->reversesId;
 
             if ($reversesId) {
+                $target = $this->ledgerTranQuery()
+                    ->whereKey($reversesId)
+                    ->first();
+
+                if ($target->reverses_transaction_id) {
+                    throw new InvalidReversalException('Cannot reverse a reversal');
+                }
+
                 $existingReversal = $this->ledgerTranQuery()
                     ->where('reverses_transaction_id', $reversesId)
                     ->first();
@@ -417,7 +426,7 @@ final class Abacus
         $completed = [];
 
         foreach ($plannedAppends as $append) {
-            $newEntry = new LedgerTransaction;
+            $newEntry = new LedgerTransaction();
             $newEntry->setConnection($this->connectionOverride);
             $newEntry->actor = $append->actor;
             $newEntry->system_date = $append->systemDate->toImmutable();
@@ -484,7 +493,7 @@ final class Abacus
     private function checkIdempotency(array $appends): ?array
     {
         // Extract non-null idempotency keys
-        $keys = array_filter(array_map(fn (Append $a) => $a->idempotencyKey, $appends));
+        $keys = array_filter(array_map(fn(Append $a) => $a->idempotencyKey, $appends));
 
         if (empty($keys)) {
             return null; // No idempotency keys provided, proceed with normal write
@@ -528,6 +537,6 @@ final class Abacus
         }
 
         // Exact replay: map existing records to Transaction DTOs and return
-        return $existing->map(fn (LedgerTransaction $tx) => $this->toDto($tx))->all();
+        return $existing->map(fn(LedgerTransaction $tx) => $this->toDto($tx))->all();
     }
 }

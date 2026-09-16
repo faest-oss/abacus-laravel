@@ -7,8 +7,7 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
-return new class extends Migration
-{
+return new class extends Migration {
     public function up(): void
     {
         Schema::create('ledger_stream_head', function (Blueprint $table) {
@@ -18,6 +17,18 @@ return new class extends Migration
             $table->primary(['ledger_type', 'ledger_id']);
         });
 
+        Schema::create('ledger_operation', function (Blueprint $table) {
+            $table->ulid('id')->primary();
+            $table->string('kind');
+            $table->string('actor');
+            $table->string('reason');
+            $table->timestamp('event_date');
+            $table->timestamp('system_date');
+            $table->timestamp('accounting_date');
+            $table->uuid('correlation_id')->nullable(true);
+            $table->string('idempotency_key')->nullable(true);
+        });
+
         Schema::create('ledger_transaction', function (Blueprint $table) {
             $table->ulid('id')->primary();
             $table->string('ledger_type');
@@ -25,15 +36,8 @@ return new class extends Migration
             $table->bigInteger('stream_version');
             $table->string('payload_type');
             $table->json('payload');
-            $table->string('reason');
             $table->foreignUlidFor(LedgerTransaction::class, 'reverses_transaction_id')->nullable(true);
             $table->foreignUlidFor(LedgerTransaction::class, 'adjusts_transaction_id')->nullable(true);
-            $table->uuid('correlation_id')->nullable(true);
-            $table->string('idempotency_key')->nullable(true);
-            $table->timestamp('event_date');
-            $table->timestamp('system_date');
-            $table->timestamp('accounting_date');
-            $table->string('actor');
 
             $table->unique(['ledger_type', 'ledger_id', 'stream_version']);
             $table->unique(['ledger_type', 'idempotency_key']);
@@ -47,6 +51,7 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('ledger_transaction');
+        Schema::dropIfExists('ledger_operation');
         Schema::dropIfExists('ledger_stream_head');
     }
 };

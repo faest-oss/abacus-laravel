@@ -9,7 +9,7 @@ use Exception;
 // use Illuminate\Http\Request;
 // use Illuminate\Http\Response;
 
-class IllegalVoidException extends Exception
+class InvalidReversalException extends Exception
 {
     /**
      * Report the exception.
