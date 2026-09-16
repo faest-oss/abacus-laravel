@@ -12,12 +12,12 @@ use Exception;
 class IdempotencyConflictException extends Exception
 {
     public function __construct(
-        public readonly string $ledgerType,
         public readonly string $idempotencyKey,
+        public readonly string $existingOperationId,
         string $message = '',
     ) {
         parent::__construct(
-            $message ?: "Idempotency key '{$idempotencyKey}' was already used with different payload or stream target on ledger '{$ledgerType}'.",
+            $message ?: "Idempotency key '{$idempotencyKey}' was already used by operation '{$existingOperationId}' with different intent.",
         );
     }
 }

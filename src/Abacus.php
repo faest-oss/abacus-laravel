@@ -4,33 +4,43 @@ declare(strict_types=1);
 
 namespace Faest\Abacus;
 
+use Carbon\CarbonImmutable;
 use Closure;
-use Exception;
+use Faest\Abacus\Contracts\CorrectionPolicy;
 use Faest\Abacus\Contracts\Ledger;
 use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\Append;
+use Faest\Abacus\Data\CorrectionContext;
+use Faest\Abacus\Data\LedgerReplacementResult;
 use Faest\Abacus\Data\LedgerTransferResult;
+use Faest\Abacus\Data\OperationAction;
+use Faest\Abacus\Data\OperationResult;
 use Faest\Abacus\Data\PostingContext;
-use Faest\Abacus\Data\ReversalDraft;
 use Faest\Abacus\Data\Transaction;
-use Faest\Abacus\Data\TransactionDraft;
+use Faest\Abacus\Enums\OperationKind;
+use Faest\Abacus\Exceptions\EmptyOperationException;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IdempotencyConflictException;
-use Faest\Abacus\Exceptions\InvalidReversalException;
+use Faest\Abacus\Exceptions\InvalidCorrectionException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
+use Faest\Abacus\Models\LedgerOperation;
 use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\Support\PayloadFingerprint;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use JsonSerializable;
 use LogicException;
+use Throwable;
 
 final class Abacus
 {
+    private const int FINGERPRINT_VERSION = 1;
+
     /** @var array<string, Ledger> */
     private array $ledgerRegistry = [];
 
@@ -68,72 +78,103 @@ final class Abacus
         return $this->ledgerTranQuery()->find($transactionId);
     }
 
-    /**
-     * @return array<mixed>|JsonSerializable
-     */
+    public function findOperation(string $operationId): ?OperationResult
+    {
+        $operation = $this->operationQuery()->find($operationId);
+
+        return $operation ? $this->toOperationResult($operation) : null;
+    }
+
+    /** @return Builder<LedgerOperation> */
+    public function operationsForStream(string $ledgerType, string $ledgerId): Builder
+    {
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+
+        return $this->operationQuery()
+            ->whereHas('transactions', fn (Builder $query) => $query
+                ->where('ledger_type', $canonicalType)
+                ->where('ledger_id', $ledgerId))
+            ->with('transactions')
+            ->orderBy(
+                $this->ledgerTranQuery()
+                    ->selectRaw('MAX(stream_version)')
+                    ->whereColumn('operation_id', 'ledger_operation.id')
+                    ->where('ledger_type', $canonicalType)
+                    ->where('ledger_id', $ledgerId),
+            );
+    }
+
+    /** @return array<mixed>|JsonSerializable */
     public function getAggregate(string $ledgerType, string $ledgerId): array|JsonSerializable
     {
-        $ledger = $this->resolveLedger($ledgerType);
+        return $this->rebuildAggregate($ledgerType, $ledgerId);
+    }
 
-        /** @var Collection<int, LedgerTransaction> $history */
-        $history = $this->ledgerTranQuery()
-            ->where('ledger_type', $ledger->getLedgerType())
+    /** @return array<mixed>|JsonSerializable */
+    public function getAggregateAtOperation(
+        string $ledgerType,
+        string $ledgerId,
+        string $operationId,
+    ): array|JsonSerializable {
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $endingVersion = $this->ledgerTranQuery()
+            ->where('operation_id', $operationId)
+            ->where('ledger_type', $canonicalType)
             ->where('ledger_id', $ledgerId)
-            ->orderBy('stream_version', 'asc')
-            ->get();
+            ->max('stream_version');
 
-        $aggregate = $ledger->initializeAggregate();
-
-        foreach ($history as $historyEntry) {
-            $aggregate = $ledger->applyToAggregate(
-                $ledger->deserialize(
-                    $historyEntry->payload_type,
-                    $historyEntry->payload,
-                ),
-                $aggregate,
-            );
+        if ($endingVersion === null) {
+            throw new InvalidArgumentException("Operation {$operationId} does not contain stream {$canonicalType}:{$ledgerId}.");
         }
 
-        return $aggregate;
+        return $this->rebuildAggregate($canonicalType, $ledgerId, (int) $endingVersion);
     }
 
-    public function post(TransactionDraft $draft, ?PostingContext $context = null): Transaction
-    {
-        return $this->postMany([$draft], $context)[0];
-    }
-
-    /**
-     * @param  array<int, TransactionDraft>  $drafts
-     * @return array<int, Transaction>
-     */
-    public function postMany(array $drafts, ?PostingContext $context = null): array
-    {
-        $context ??= PostingContext::forUser();
-
-        if (count($drafts) > 1 && $context->correlationId === null) {
-            $context = $context->withCorrelationId((string) Str::orderedUuid());
-        } elseif (count($drafts) === 1 && $context->correlationId === null) {
-            $context = $context->withCorrelationId(null);
-        }
-
-        $appends = [];
-
-        foreach ($drafts as $draft) {
-            $appends[] = Append::make($draft, $context);
-        }
-
-        return $this->writeMany($appends);
+    public function post(
+        string $ledgerType,
+        string $ledgerId,
+        LedgerPayload $payload,
+        ?PostingContext $context = null,
+        ?int $expectedVersion = null,
+    ): Transaction {
+        return $this->executeOperation(
+            [OperationAction::post($ledgerType, $ledgerId, $payload, $expectedVersion)],
+            $context ?? PostingContext::forUser(),
+        )->transactions[0];
     }
 
     /**
-     * Coordinate multiple ledger operations using a bundle builder.
-     *
-     * @param  PostingContext|Closure(BundleBuilder): void  $contextOrCallback
-     * @param  (Closure(BundleBuilder): void)|null  $callback
-     * @return array<int, Transaction>
+     * @param  list<LedgerPayload>  $payloads
+     * @return list<Transaction>
      */
-    public function bundle(PostingContext|Closure $contextOrCallback, ?Closure $callback = null): array
-    {
+    public function postMany(
+        string $ledgerType,
+        string $ledgerId,
+        array $payloads,
+        ?PostingContext $context = null,
+        ?int $expectedVersion = null,
+    ): array {
+        $actions = array_map(
+            fn (LedgerPayload $payload): OperationAction => OperationAction::post(
+                $ledgerType,
+                $ledgerId,
+                $payload,
+                $expectedVersion,
+            ),
+            $payloads,
+        );
+
+        return $this->executeOperation($actions, $context ?? PostingContext::forUser())->transactions;
+    }
+
+    /**
+     * @param  PostingContext|Closure(OperationBuilder): void  $contextOrCallback
+     * @param  (Closure(OperationBuilder): void)|null  $callback
+     */
+    public function operation(
+        PostingContext|Closure $contextOrCallback,
+        ?Closure $callback = null,
+    ): OperationResult {
         if ($contextOrCallback instanceof Closure) {
             $callback = $contextOrCallback;
             $context = PostingContext::forUser();
@@ -142,80 +183,92 @@ final class Abacus
         }
 
         if ($callback === null) {
-            throw new InvalidArgumentException('A bundle callback must be provided');
+            throw new InvalidArgumentException('An operation callback must be provided.');
         }
 
-        $builder = new BundleBuilder($this);
+        $builder = new OperationBuilder;
         $callback($builder);
 
-        return $this->postMany($builder->getDrafts(), $context);
+        return $this->executeOperation($builder->actions(), $context);
     }
 
-    public function streamVersion(string $ledgerType, string $ledgerId): int
-    {
-        $head = $this->conn()->table('ledger_stream_head')->where([
-            'ledger_type' => $ledgerType,
-            'ledger_id' => $ledgerId,
-        ])->first();
-
-        return $head ? (int) $head->version : 0;
+    public function reverse(
+        string $transactionId,
+        ?PostingContext $context = null,
+        ?int $expectedVersion = null,
+    ): Transaction {
+        return $this->executeOperation(
+            [OperationAction::reverse($transactionId, $expectedVersion)],
+            $context ?? PostingContext::forUser(),
+        )->transactions[0];
     }
 
-    public function postReversal(ReversalDraft $draft, ?PostingContext $context = null): Transaction
-    {
-        $context ??= PostingContext::forUser();
-        $transactionToReverse = $this->ledgerTranQuery()->findSole($draft->transactionId);
-
-        $ledger = $this->resolveLedger($transactionToReverse->ledger_type);
-        $payload = $ledger->deserialize($transactionToReverse->payload_type, $transactionToReverse->payload);
-
-        return $this->write(
-            Append::make(
-                TransactionDraft::make(
-                    $transactionToReverse->ledger_type,
-                    $transactionToReverse->ledger_id,
-                    $ledger->computeOpposing($payload),
-                )->failIfVersionIsnt($draft->expectedVersion),
-                $context,
-            )->reverses($transactionToReverse->id),
+    public function replace(
+        string $transactionId,
+        LedgerPayload $replacement,
+        ?PostingContext $context = null,
+        ?int $expectedVersion = null,
+    ): LedgerReplacementResult {
+        $result = $this->executeOperation(
+            [OperationAction::replace($transactionId, $replacement, $expectedVersion)],
+            $context ?? PostingContext::forUser(),
         );
+
+        return new LedgerReplacementResult($result->id, $result->transactions[0], $result->transactions[1]);
     }
 
-    public function reverse(string $transactionId, ?PostingContext $context = null): Transaction
-    {
-        return $this->postReversal(ReversalDraft::make($transactionId), $context);
+    public function adjust(
+        string $transactionId,
+        LedgerPayload $delta,
+        ?PostingContext $context = null,
+        ?int $expectedVersion = null,
+    ): Transaction {
+        return $this->executeOperation(
+            [OperationAction::adjust($transactionId, $delta, $expectedVersion)],
+            $context ?? PostingContext::forUser(),
+        )->transactions[0];
     }
 
-    /**
-     * @return array<int, Transaction>
-     */
-    public function reverseOperation(string $correlationId, ?PostingContext $context = null): array
+    /** @return list<Transaction> */
+    public function reverseOperation(string $operationId, ?PostingContext $context = null): array
     {
+        $operation = $this->operationQuery()->find($operationId);
+
+        if (! $operation) {
+            throw new InvalidArgumentException("Ledger operation {$operationId} was not found.");
+        }
+
         $transactions = $this->ledgerTranQuery()
-            ->where('correlation_id', $correlationId)
-            ->whereNull('reverses_transaction_id')
+            ->where('operation_id', $operationId)
+            ->orderBy('operation_position')
             ->get();
 
         if ($transactions->isEmpty()) {
-            throw new InvalidArgumentException("No unreversed transactions found for operation: {$correlationId}");
+            throw new InvalidArgumentException("Ledger operation {$operationId} has no entries.");
         }
 
-        $context ??= PostingContext::forUser();
-        $reversalDrafts = [];
-
-        foreach ($transactions as $tx) {
-            $ledger = $this->resolveLedger($tx->ledger_type);
-            $payload = $ledger->deserialize($tx->payload_type, $tx->payload);
-            $opposing = $ledger->computeOpposing($payload);
-
-            $reversalDrafts[] = TransactionDraft::make(
-                $tx->ledger_type,
-                $tx->ledger_id,
-                $opposing,
-            )->reverses($tx->id);
+        foreach ($transactions as $transaction) {
+            if ($transaction->reverses_transaction_id !== null) {
+                throw new InvalidCorrectionException(
+                    'operation_contains_reversal',
+                    $transaction->id,
+                    'An operation containing a reversal entry cannot be reversed.',
+                );
+            }
         }
 
-        return $this->postMany($reversalDrafts, $context);
+        $actions = [];
+
+        foreach ($transactions as $transaction) {
+            $actions[] = OperationAction::reverse($transaction->id);
+        }
+
+        return $this->executeOperation(
+            $actions,
+            $context ?? PostingContext::forUser(),
+            OperationKind::OperationReversal,
+            $operationId,
+        )->transactions;
     }
 
     public function transfer(
@@ -224,20 +277,39 @@ final class Abacus
         string $destinationLedgerId,
         string $ledgerType,
         ?PostingContext $context = null,
+        ?int $expectedSourceVersion = null,
+        ?int $expectedDestinationVersion = null,
     ): LedgerTransferResult {
-        $context ??= PostingContext::forUser();
-        $correlationId = $context->correlationId ?? (string) Str::orderedUuid();
-        $context = $context->withCorrelationId($correlationId);
+        $result = $this->executeOperation(
+            [OperationAction::transfer(
+                $ledgerType,
+                $sourceLedgerId,
+                $destinationLedgerId,
+                $payload,
+                $expectedSourceVersion,
+                $expectedDestinationVersion,
+            )],
+            $context ?? PostingContext::forUser(),
+        );
+        $operation = $this->operationQuery()->findOrFail($result->id);
 
-        $ledger = $this->resolveLedger($ledgerType);
-        $opposingPayload = $ledger->computeOpposing($payload);
+        return new LedgerTransferResult(
+            $result->id,
+            (string) $operation->correlation_id,
+            $result->transactions[0],
+            $result->transactions[1],
+        );
+    }
 
-        $sourceDraft = TransactionDraft::make($ledgerType, $sourceLedgerId, $payload);
-        $destDraft = TransactionDraft::make($ledgerType, $destinationLedgerId, $opposingPayload);
+    public function streamVersion(string $ledgerType, string $ledgerId): int
+    {
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $head = $this->conn()->table('ledger_stream_head')->where([
+            'ledger_type' => $canonicalType,
+            'ledger_id' => $ledgerId,
+        ])->first();
 
-        $results = $this->postMany([$sourceDraft, $destDraft], $context);
-
-        return new LedgerTransferResult($correlationId, $results[0], $results[1]);
+        return $head ? (int) $head->version : 0;
     }
 
     public function overrideConnection(string $connection): void
@@ -250,293 +322,712 @@ final class Abacus
         $this->lockTimeout = $timeout;
     }
 
-    private function conn(): Connection
-    {
-        return DB::connection($this->connectionOverride);
-    }
-
-    /**
-     * @return Builder<LedgerTransaction>
-     */
+    /** @return Builder<LedgerTransaction> */
     public function ledgerTranQuery(): Builder
     {
         return LedgerTransaction::on($this->connectionOverride);
     }
 
-    private function toDto(LedgerTransaction $model): Transaction
+    /** @return Builder<LedgerOperation> */
+    public function operationQuery(): Builder
     {
-        return new Transaction($model->id, $model->stream_version);
+        return LedgerOperation::on($this->connectionOverride);
     }
 
     /**
-     * @param  array<int, Append>  $appends
-     * @return array<int, array<int, string>>
+     * @param  list<OperationAction>  $actions
      */
-    private function normalizeStreams(array $appends): array
-    {
-        $streams = [];
-        foreach ($appends as $append) {
-            if ($append->expectedVersion !== null && $append->expectedVersion < 0) {
-                throw new InvalidArgumentException('Expected version must not be negative');
-            }
-
-            $streams[] = [$append->ledgerType, $append->ledgerId];
+    private function executeOperation(
+        array $actions,
+        PostingContext $context,
+        ?OperationKind $forcedKind = null,
+        ?string $reversesOperationId = null,
+    ): OperationResult {
+        if ($actions === []) {
+            throw new EmptyOperationException;
         }
 
-        usort($streams, function (array $a, array $b): int {
-            return strcmp($a[0], $b[0]) ?: strcmp($a[1], $b[1]);
+        $actions = $this->normalizeActions($actions);
+        $kind = $forcedKind ?? $this->deriveOperationKind($actions);
+        $fingerprint = $this->fingerprint($actions, $kind, $context, $reversesOperationId);
+
+        if ($context->correlationId === null && $this->containsTransfer($actions)) {
+            $context = $context->withCorrelationId((string) Str::orderedUuid());
+        }
+
+        $recordedAt = CarbonImmutable::now();
+
+        return $this->conn()->transaction(function () use (
+            $actions,
+            $kind,
+            $context,
+            $fingerprint,
+            $recordedAt,
+            $reversesOperationId,
+        ): OperationResult {
+            [$operation, $replayed] = $this->claimOperation(
+                $kind,
+                $context,
+                $fingerprint,
+                $recordedAt,
+                $reversesOperationId,
+            );
+
+            if ($replayed) {
+                return $this->toOperationResult($operation);
+            }
+
+            $streams = $this->affectedStreams($actions);
+            $this->prepareStreamHeads($streams);
+            $heads = $this->lockStreamHeads($streams);
+            [$appends, $corrections] = $this->expandActions($actions);
+            $this->assertExpectedVersions($appends, $heads);
+            $this->assertCorrectionRelationships($corrections);
+
+            [$planned, $before, $after] = $this->planAppends($appends, $heads);
+            $this->assertCorrectionPolicies($corrections, $context, $before, $after);
+            $this->persistAppends($operation, $planned, $context, $recordedAt);
+
+            return $this->toOperationResult($operation);
         });
+    }
+
+    /**
+     * @param  list<OperationAction>  $actions
+     * @return list<OperationAction>
+     */
+    private function normalizeActions(array $actions): array
+    {
+        $normalized = [];
+
+        foreach ($actions as $action) {
+            foreach ([$action->expectedVersion, $action->expectedDestinationVersion] as $expectedVersion) {
+                if ($expectedVersion !== null && $expectedVersion < 0) {
+                    throw new InvalidArgumentException('Expected version must not be negative.');
+                }
+            }
+
+            if (in_array($action->kind, [OperationKind::Posting, OperationKind::Transfer], true)) {
+                if ($action->ledgerType === null || $action->ledgerId === null || $action->payload === null) {
+                    throw new LogicException('Posting and transfer actions require a stream and payload.');
+                }
+
+                $ledgerType = $this->resolveLedger($action->ledgerType)->getLedgerType();
+
+                if ($action->kind === OperationKind::Transfer) {
+                    if ($action->destinationLedgerId === null || $action->destinationLedgerId === $action->ledgerId) {
+                        throw new InvalidArgumentException('A transfer requires two different ledger streams.');
+                    }
+
+                    $normalized[] = OperationAction::transfer(
+                        $ledgerType,
+                        $action->ledgerId,
+                        $action->destinationLedgerId,
+                        $action->payload,
+                        $action->expectedVersion,
+                        $action->expectedDestinationVersion,
+                    );
+                } else {
+                    $normalized[] = OperationAction::post(
+                        $ledgerType,
+                        $action->ledgerId,
+                        $action->payload,
+                        $action->expectedVersion,
+                    );
+                }
+
+                continue;
+            }
+
+            $normalized[] = $action;
+        }
+
+        return $normalized;
+    }
+
+    /** @param list<OperationAction> $actions */
+    private function deriveOperationKind(array $actions): OperationKind
+    {
+        $onlyPostings = true;
+
+        foreach ($actions as $action) {
+            if ($action->kind !== OperationKind::Posting) {
+                $onlyPostings = false;
+
+                break;
+            }
+        }
+
+        if ($onlyPostings) {
+            return OperationKind::Posting;
+        }
+
+        return count($actions) === 1 ? $actions[0]->kind : OperationKind::Composite;
+    }
+
+    /** @param list<OperationAction> $actions */
+    private function containsTransfer(array $actions): bool
+    {
+        foreach ($actions as $action) {
+            if ($action->kind === OperationKind::Transfer) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  list<OperationAction>  $actions
+     */
+    private function fingerprint(
+        array $actions,
+        OperationKind $kind,
+        PostingContext $context,
+        ?string $reversesOperationId,
+    ): string {
+        $intent = [
+            'version' => self::FINGERPRINT_VERSION,
+            'kind' => $kind->value,
+            'actor' => $context->actor,
+            'event_date' => $context->eventDate->toIso8601String(),
+            'accounting_date' => $context->accountingDate->toIso8601String(),
+            'reason' => $context->reason,
+            'metadata' => $context->metadata,
+            'correlation_id' => $context->correlationId,
+            'reverses_operation_id' => $reversesOperationId,
+            'actions' => array_map(fn (OperationAction $action): array => [
+                'kind' => $action->kind->value,
+                'ledger_type' => $action->ledgerType,
+                'ledger_id' => $action->ledgerId,
+                'payload_type' => $action->payload?->payloadType(),
+                'payload' => $action->payload?->jsonSerialize(),
+                'target_transaction_id' => $action->targetTransactionId,
+                'destination_ledger_id' => $action->destinationLedgerId,
+            ], $actions),
+        ];
+
+        return hash('sha256', PayloadFingerprint::canonicalize($intent));
+    }
+
+    /** @return array{LedgerOperation, bool} */
+    private function claimOperation(
+        OperationKind $kind,
+        PostingContext $context,
+        string $fingerprint,
+        CarbonImmutable $recordedAt,
+        ?string $reversesOperationId,
+    ): array {
+        $operation = new LedgerOperation;
+        $operation->setConnection($this->connectionOverride);
+        $operation->kind = $kind;
+        $operation->actor = $context->actor;
+        $operation->reason = $context->reason;
+        $operation->event_date = $context->eventDate;
+        $operation->accounting_date = $context->accountingDate;
+        $operation->system_date = $recordedAt;
+        $operation->correlation_id = $context->correlationId;
+        $operation->metadata = $context->metadata;
+        $operation->idempotency_key = $context->idempotencyKey;
+        $operation->request_fingerprint_version = self::FINGERPRINT_VERSION;
+        $operation->request_fingerprint = $fingerprint;
+        $operation->reverses_operation_id = $reversesOperationId;
+
+        try {
+            $this->conn()->transaction(fn () => $operation->save());
+
+            return [$operation, false];
+        } catch (QueryException $exception) {
+            if ($context->idempotencyKey === null) {
+                throw $exception;
+            }
+
+            $existing = $this->operationQuery()
+                ->where('idempotency_key', $context->idempotencyKey)
+                ->first();
+
+            if (! $existing) {
+                throw $exception;
+            }
+
+            if ($existing->request_fingerprint !== $fingerprint
+                || $existing->request_fingerprint_version !== self::FINGERPRINT_VERSION) {
+                throw new IdempotencyConflictException($context->idempotencyKey, $existing->id);
+            }
+
+            return [$existing, true];
+        }
+    }
+
+    /**
+     * @param  list<OperationAction>  $actions
+     * @return array{list<Append>, list<array{kind: OperationKind, original: LedgerTransaction, payloads: list<LedgerPayload>}>}
+     */
+    private function expandActions(array $actions): array
+    {
+        $appends = [];
+        $corrections = [];
+
+        foreach ($actions as $action) {
+            if ($action->kind === OperationKind::Posting) {
+                $appends[] = new Append(
+                    (string) $action->ledgerType,
+                    (string) $action->ledgerId,
+                    $action->payload ?? throw new LogicException('Posting payload is missing.'),
+                    $action->expectedVersion,
+                );
+
+                continue;
+            }
+
+            if ($action->kind === OperationKind::Transfer) {
+                $ledger = $this->resolveLedger((string) $action->ledgerType);
+                $payload = $action->payload ?? throw new LogicException('Transfer payload is missing.');
+                $appends[] = new Append(
+                    $ledger->getLedgerType(),
+                    (string) $action->ledgerId,
+                    $payload,
+                    $action->expectedVersion,
+                );
+                $appends[] = new Append(
+                    $ledger->getLedgerType(),
+                    (string) $action->destinationLedgerId,
+                    $ledger->computeOpposing($payload),
+                    $action->expectedDestinationVersion,
+                );
+
+                continue;
+            }
+
+            $targetId = $action->targetTransactionId
+                ?? throw new LogicException('Correction target is missing.');
+            $original = $this->findTransaction($targetId);
+
+            if (! $original) {
+                throw new InvalidCorrectionException(
+                    'target_not_found',
+                    $targetId,
+                    "Correction target {$targetId} was not found.",
+                );
+            }
+
+            $ledger = $this->resolveLedger($original->ledger_type);
+            $originalPayload = $ledger->deserialize($original->payload_type, $original->payload);
+
+            if ($action->kind === OperationKind::Reversal) {
+                $opposing = $ledger->computeOpposing($originalPayload);
+                $appends[] = new Append(
+                    $original->ledger_type,
+                    $original->ledger_id,
+                    $opposing,
+                    $action->expectedVersion,
+                    reversesId: $original->id,
+                );
+                $corrections[] = ['kind' => $action->kind, 'original' => $original, 'payloads' => [$opposing]];
+
+                continue;
+            }
+
+            if ($action->kind === OperationKind::Replacement) {
+                $opposing = $ledger->computeOpposing($originalPayload);
+                $replacement = $action->payload ?? throw new LogicException('Replacement payload is missing.');
+                $appends[] = new Append(
+                    $original->ledger_type,
+                    $original->ledger_id,
+                    $opposing,
+                    $action->expectedVersion,
+                    reversesId: $original->id,
+                );
+                $appends[] = new Append(
+                    $original->ledger_type,
+                    $original->ledger_id,
+                    $replacement,
+                    $action->expectedVersion,
+                    replacesId: $original->id,
+                );
+                $corrections[] = [
+                    'kind' => $action->kind,
+                    'original' => $original,
+                    'payloads' => [$opposing, $replacement],
+                ];
+
+                continue;
+            }
+
+            $delta = $action->payload ?? throw new LogicException('Adjustment payload is missing.');
+            $appends[] = new Append(
+                $original->ledger_type,
+                $original->ledger_id,
+                $delta,
+                $action->expectedVersion,
+                adjustsId: $original->id,
+            );
+            $corrections[] = ['kind' => $action->kind, 'original' => $original, 'payloads' => [$delta]];
+        }
+
+        return [$appends, $corrections];
+    }
+
+    /**
+     * @param  list<array{kind: OperationKind, original: LedgerTransaction, payloads: list<LedgerPayload>}>  $corrections
+     */
+    private function assertCorrectionRelationships(array $corrections): void
+    {
+        $reversedTargets = [];
+
+        foreach ($corrections as $correction) {
+            $original = $correction['original']->fresh();
+
+            if (! $original) {
+                throw new InvalidCorrectionException(
+                    'target_not_found',
+                    $correction['original']->id,
+                    'The correction target no longer exists.',
+                );
+            }
+
+            if ($original->reverses_transaction_id !== null) {
+                throw new InvalidCorrectionException(
+                    'reversal_target',
+                    $original->id,
+                    'A reversal entry cannot be corrected.',
+                );
+            }
+
+            if (! in_array($correction['kind'], [OperationKind::Reversal, OperationKind::Replacement], true)) {
+                continue;
+            }
+
+            if (in_array($original->id, $reversedTargets, true)
+                || $this->ledgerTranQuery()->where('reverses_transaction_id', $original->id)->exists()) {
+                throw new InvalidCorrectionException(
+                    'already_reversed',
+                    $original->id,
+                    'This transaction has already been reversed.',
+                );
+            }
+
+            $reversedTargets[] = $original->id;
+        }
+    }
+
+    /**
+     * @param  list<OperationAction>  $actions
+     * @return list<array{0: string, 1: string}>
+     */
+    private function affectedStreams(array $actions): array
+    {
+        $streams = [];
+
+        foreach ($actions as $action) {
+            if ($action->kind === OperationKind::Posting) {
+                $streams[] = [(string) $action->ledgerType, (string) $action->ledgerId];
+
+                continue;
+            }
+
+            if ($action->kind === OperationKind::Transfer) {
+                $streams[] = [(string) $action->ledgerType, (string) $action->ledgerId];
+                $streams[] = [(string) $action->ledgerType, (string) $action->destinationLedgerId];
+
+                continue;
+            }
+
+            $targetId = $action->targetTransactionId
+                ?? throw new LogicException('Correction target is missing.');
+            $target = $this->findTransaction($targetId);
+
+            if (! $target) {
+                throw new InvalidCorrectionException(
+                    'target_not_found',
+                    $targetId,
+                    "Correction target {$targetId} was not found.",
+                );
+            }
+
+            $streams[] = [$target->ledger_type, $target->ledger_id];
+        }
+
+        usort($streams, fn (array $left, array $right): int => strcmp($left[0], $right[0]) ?: strcmp($left[1], $right[1]));
 
         return array_values(array_unique($streams, SORT_REGULAR));
     }
 
-    /**
-     * @param  array<int, array<int, string>>  $streams
-     */
+    /** @param list<array{0: string, 1: string}> $streams */
     private function prepareStreamHeads(array $streams): void
     {
-        $pairs = [];
-        foreach ($streams as $stream) {
-            $pairs[] = ['ledger_type' => $stream[0], 'ledger_id' => $stream[1]];
-        }
+        foreach ($streams as [$ledgerType, $ledgerId]) {
+            $query = $this->conn()->table('ledger_stream_head')->where([
+                'ledger_type' => $ledgerType,
+                'ledger_id' => $ledgerId,
+            ]);
 
-        $this->conn()->table('ledger_stream_head')->insertOrIgnore($pairs);
+            if ($query->exists()) {
+                continue;
+            }
+
+            $this->conn()->table('ledger_stream_head')->insertOrIgnore([
+                'ledger_type' => $ledgerType,
+                'ledger_id' => $ledgerId,
+            ]);
+        }
     }
 
     /**
-     * @param  array<int, array<int, string>>  $streams
+     * @param  list<array{0: string, 1: string}>  $streams
      * @return array<string, array<string, int>>
      */
     private function lockStreamHeads(array $streams): array
     {
         $heads = [];
 
-        if ($this->lockTimeout) {
+        if ($this->lockTimeout !== null && $this->lockTimeout > 0) {
             $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
         }
 
-        foreach ($streams as $stream) {
-            $q = $this->conn()->table('ledger_stream_head')
-                ->where('ledger_type', $stream[0])
-                ->where('ledger_id', $stream[1]);
+        foreach ($streams as [$ledgerType, $ledgerId]) {
+            $query = $this->conn()->table('ledger_stream_head')
+                ->where('ledger_type', $ledgerType)
+                ->where('ledger_id', $ledgerId);
+            $head = $this->lockTimeout === 0
+                ? $query->lock('for update nowait')->first()
+                : $query->lockForUpdate()->first();
 
-            if ($this->lockTimeout === 0) {
-                $q = $q->lock('for update nowait');
-            } else {
-                $q = $q->lockForUpdate();
+            if (! $head) {
+                throw new LogicException("Stream head {$ledgerType}:{$ledgerId} was not prepared.");
             }
 
-            $heads[$stream[0]][$stream[1]] = (int) $q->first()->version;
+            $heads[$ledgerType][$ledgerId] = (int) $head->version;
         }
 
         return $heads;
     }
 
     /**
-     * @param  array<int, Append>  $appends
+     * @param  list<Append>  $appends
      * @param  array<string, array<string, int>>  $heads
      */
     private function assertExpectedVersions(array $appends, array $heads): void
     {
-        foreach ($appends as $append) {
-            $currentVersion = $heads[$append->ledgerType][$append->ledgerId];
+        $expectations = [];
 
-            if ($append->expectedVersion !== null && $append->expectedVersion !== $currentVersion) {
-                throw new UnexpectedStreamVersionException(
-                    'Stream expectation failed',
-                    $append->ledgerType,
-                    $append->ledgerId,
-                    $append->expectedVersion,
-                    $currentVersion,
-                );
+        foreach ($appends as $append) {
+            if ($append->expectedVersion === null) {
+                continue;
+            }
+
+            $existing = $expectations[$append->ledgerType][$append->ledgerId] ?? null;
+
+            if ($existing !== null && $existing !== $append->expectedVersion) {
+                throw new InvalidArgumentException('Expected versions for the same stream must agree.');
+            }
+
+            $expectations[$append->ledgerType][$append->ledgerId] = $append->expectedVersion;
+        }
+
+        foreach ($expectations as $ledgerType => $ledgerExpectations) {
+            foreach ($ledgerExpectations as $ledgerId => $expectedVersion) {
+                $actualVersion = $heads[$ledgerType][$ledgerId];
+
+                if ($expectedVersion !== $actualVersion) {
+                    throw new UnexpectedStreamVersionException(
+                        'Stream expectation failed',
+                        $ledgerType,
+                        (string) $ledgerId,
+                        $expectedVersion,
+                        $actualVersion,
+                    );
+                }
             }
         }
     }
 
     /**
-     * @param  array<int, Append>  $appends
+     * @param  list<Append>  $appends
      * @param  array<string, array<string, int>>  $heads
-     * @return array<int, Append>
+     * @return array{list<Append>, array<string, array<string, array<mixed>|JsonSerializable>>, array<string, array<string, array<mixed>|JsonSerializable>>}
      */
     private function planAppends(array $appends, array $heads): array
     {
         $planned = [];
-        $aggregates = [];
+        $before = [];
+        $after = [];
 
-        foreach ($appends as $append) {
-            $reversesId = $append->reversesId;
-
-            if ($reversesId) {
-                $target = $this->ledgerTranQuery()
-                    ->whereKey($reversesId)
-                    ->first();
-
-                if ($target->reverses_transaction_id) {
-                    throw new InvalidReversalException('Cannot reverse a reversal');
-                }
-
-                $existingReversal = $this->ledgerTranQuery()
-                    ->where('reverses_transaction_id', $reversesId)
-                    ->first();
-
-                if ($existingReversal) {
-                    throw new Exception('This transaction has already been reversed');
-                }
-            }
-
+        foreach ($appends as $position => $append) {
             $ledger = $this->resolveLedger($append->ledgerType);
 
-            $aggregate = $aggregates[$append->ledgerType][$append->ledgerId] ?? null;
-
-            if ($aggregate === null) {
-                $aggregate = $this->getAggregate($append->ledgerType, $append->ledgerId);
+            if (! isset($after[$append->ledgerType][$append->ledgerId])) {
+                $aggregate = $this->rebuildAggregate($append->ledgerType, $append->ledgerId);
+                $before[$append->ledgerType][$append->ledgerId] = $aggregate;
+                $after[$append->ledgerType][$append->ledgerId] = $aggregate;
             }
 
             try {
-                $ledger->assertInvariants($append->payload, $aggregate);
-            } catch (Exception $e) {
-                throw new FailedInvariantException($e->getMessage(), $append->source, previous: $e);
+                $ledger->assertValidPayload($append->payload);
+                $after[$append->ledgerType][$append->ledgerId] = $ledger->applyToAggregate(
+                    $append->payload,
+                    $after[$append->ledgerType][$append->ledgerId],
+                );
+            } catch (Throwable $exception) {
+                throw new FailedInvariantException(
+                    $exception->getMessage(),
+                    $append->ledgerType,
+                    $append->ledgerId,
+                    previous: $exception,
+                );
             }
 
-            $aggregates[$append->ledgerType][$append->ledgerId] = $ledger->applyToAggregate(
-                $append->payload,
-                $aggregate,
-            );
-
-            $currentVersion = $heads[$append->ledgerType][$append->ledgerId];
-            $nextVersion = $currentVersion + 1;
-
-            $planned[] = $append->withVersion($nextVersion);
+            $nextVersion = $heads[$append->ledgerType][$append->ledgerId] + 1;
             $heads[$append->ledgerType][$append->ledgerId] = $nextVersion;
+            $planned[] = $append->planned($nextVersion, $position + 1);
         }
 
-        return $planned;
+        foreach ($after as $ledgerType => $streamAggregates) {
+            $ledger = $this->resolveLedger($ledgerType);
+
+            foreach ($streamAggregates as $ledgerId => $aggregate) {
+                try {
+                    $ledger->assertAggregateInvariants($aggregate);
+                } catch (Throwable $exception) {
+                    throw new FailedInvariantException(
+                        $exception->getMessage(),
+                        $ledgerType,
+                        $ledgerId,
+                        previous: $exception,
+                    );
+                }
+            }
+        }
+
+        return [$planned, $before, $after];
     }
 
     /**
-     * @param  array<int, Append>  $plannedAppends
-     * @return array<int, Transaction>
+     * @param  list<array{kind: OperationKind, original: LedgerTransaction, payloads: list<LedgerPayload>}>  $corrections
+     * @param  array<string, array<string, array<mixed>|JsonSerializable>>  $before
+     * @param  array<string, array<string, array<mixed>|JsonSerializable>>  $after
      */
-    private function persistAppends(array $plannedAppends): array
-    {
+    private function assertCorrectionPolicies(
+        array $corrections,
+        PostingContext $context,
+        array $before,
+        array $after,
+    ): void {
+        foreach ($corrections as $correction) {
+            $original = $correction['original'];
+            $ledger = $this->resolveLedger($original->ledger_type);
+
+            if (! $ledger instanceof CorrectionPolicy) {
+                continue;
+            }
+
+            $ledger->assertCorrectionAllowed(new CorrectionContext(
+                $correction['kind'],
+                $original,
+                $correction['payloads'],
+                $context,
+                $before[$original->ledger_type][$original->ledger_id],
+                $after[$original->ledger_type][$original->ledger_id],
+            ));
+        }
+    }
+
+    /** @param list<Append> $appends */
+    private function persistAppends(
+        LedgerOperation $operation,
+        array $appends,
+        PostingContext $context,
+        CarbonImmutable $recordedAt,
+    ): void {
         if ($this->conn()->transactionLevel() === 0) {
-            throw new LogicException('Ledger operations must run within a db transaction');
+            throw new LogicException('Ledger operations must run within a database transaction.');
         }
 
-        $completed = [];
-
-        foreach ($plannedAppends as $append) {
-            $newEntry = new LedgerTransaction();
-            $newEntry->setConnection($this->connectionOverride);
-            $newEntry->actor = $append->actor;
-            $newEntry->system_date = $append->systemDate->toImmutable();
-            $newEntry->reverses_transaction_id = $append->reversesId;
-            // $newEntry->adjusts_transaction_id = $append->adjustsId;
-            $newEntry->correlation_id = $append->correlationId;
-            $newEntry->idempotency_key = $append->idempotencyKey;
-            $newEntry->payload_type = $append->payload->payloadType();
-            $newEntry->ledger_type = $append->ledgerType;
-            $newEntry->ledger_id = $append->ledgerId;
-            $newEntry->event_date = $append->eventDate->toImmutable();
-            $newEntry->accounting_date = $append->accountingDate->toImmutable();
-            $newEntry->payload = $append->payload->jsonSerialize();
-            $newEntry->reason = $append->reason;
-            $newEntry->stream_version = $append->version;
-            $newEntry->save();
+        foreach ($appends as $append) {
+            $transaction = new LedgerTransaction;
+            $transaction->setConnection($this->connectionOverride);
+            $transaction->operation_id = $operation->id;
+            $transaction->operation_position = $append->operationPosition;
+            $transaction->actor = $context->actor;
+            $transaction->system_date = $recordedAt;
+            $transaction->reverses_transaction_id = $append->reversesId;
+            $transaction->replaces_transaction_id = $append->replacesId;
+            $transaction->adjusts_transaction_id = $append->adjustsId;
+            $transaction->correlation_id = $context->correlationId;
+            $transaction->payload_type = $append->payload->payloadType();
+            $transaction->ledger_type = $append->ledgerType;
+            $transaction->ledger_id = $append->ledgerId;
+            $transaction->event_date = $context->eventDate;
+            $transaction->accounting_date = $context->accountingDate;
+            $transaction->payload = $append->payload->jsonSerialize();
+            $transaction->reason = $context->reason;
+            $transaction->stream_version = $append->version;
+            $transaction->save();
 
             $this->conn()->table('ledger_stream_head')->where([
                 'ledger_type' => $append->ledgerType,
                 'ledger_id' => $append->ledgerId,
             ])->update(['version' => $append->version]);
-
-            $completed[] = $this->toDto($newEntry);
         }
-
-        return $completed;
     }
 
-    /**
-     * @param  array<int, Append>  $appends
-     * @return array<int, Transaction>
-     */
-    private function writeMany(array $appends): array
-    {
-        $replayed = $this->checkIdempotency($appends);
+    /** @return array<mixed>|JsonSerializable */
+    private function rebuildAggregate(
+        string $ledgerType,
+        string $ledgerId,
+        ?int $throughVersion = null,
+    ): array|JsonSerializable {
+        $ledger = $this->resolveLedger($ledgerType);
+        $query = $this->ledgerTranQuery()
+            ->where('ledger_type', $ledger->getLedgerType())
+            ->where('ledger_id', $ledgerId)
+            ->orderBy('stream_version');
 
-        if ($replayed !== null) {
-            return $replayed;
+        if ($throughVersion !== null) {
+            $query->where('stream_version', '<=', $throughVersion);
         }
 
-        $streams = $this->normalizeStreams($appends);
-        $this->prepareStreamHeads($streams);
+        /** @var Collection<int, LedgerTransaction> $history */
+        $history = $query->get();
+        $aggregate = $ledger->initializeAggregate();
 
-        return $this->conn()->transaction(function () use ($appends, $streams) {
-            $heads = $this->lockStreamHeads($streams);
-
-            $this->assertExpectedVersions($appends, $heads);
-
-            $planned = $this->planAppends($appends, $heads);
-
-            return $this->persistAppends($planned);
-        });
-    }
-
-    private function write(Append $append): Transaction
-    {
-        return $this->writeMany([$append])[0];
-    }
-
-    /**
-     * @param  array<int, Append>  $appends
-     * @return ?array<int, Transaction>
-     */
-    private function checkIdempotency(array $appends): ?array
-    {
-        // Extract non-null idempotency keys
-        $keys = array_filter(array_map(fn(Append $a) => $a->idempotencyKey, $appends));
-
-        if (empty($keys)) {
-            return null; // No idempotency keys provided, proceed with normal write
-        }
-
-        // Query existing transactions for these keys
-        $existing = $this->ledgerTranQuery()
-            ->whereIn('idempotency_key', $keys)
-            ->orderBy('stream_version', 'asc')
-            ->get();
-
-        if ($existing->isEmpty()) {
-            return null; // First-time write
-        }
-
-        // If key count doesn't match or draft count differs -> conflict
-        if ($existing->count() !== count($appends)) {
-            throw new IdempotencyConflictException(
-                $appends[0]->ledgerType,
-                $keys[0],
-                'Idempotent batch size mismatch.',
+        foreach ($history as $entry) {
+            $aggregate = $ledger->applyToAggregate(
+                $ledger->deserialize($entry->payload_type, $entry->payload),
+                $aggregate,
             );
         }
 
-        // Verify each append matches the existing transaction
-        foreach ($appends as $index => $append) {
-            $tx = $existing[$index];
+        return $aggregate;
+    }
 
-            $targetMismatch = $tx->ledger_type !== $append->ledgerType
-                || $tx->ledger_id !== $append->ledgerId
-                || $tx->payload_type !== $append->payload->payloadType();
+    private function toTransaction(LedgerTransaction $transaction): Transaction
+    {
+        return new Transaction(
+            $transaction->id,
+            $transaction->stream_version,
+            $transaction->operation_id,
+            $transaction->operation_position,
+        );
+    }
 
-            $payloadMismatch = ! PayloadFingerprint::matches($append->payload, $tx->payload);
+    private function toOperationResult(LedgerOperation $operation): OperationResult
+    {
+        $models = $this->ledgerTranQuery()
+            ->where('operation_id', $operation->id)
+            ->orderBy('operation_position')
+            ->get();
+        $transactions = [];
 
-            if ($targetMismatch || $payloadMismatch) {
-                throw new IdempotencyConflictException(
-                    $append->ledgerType,
-                    $append->idempotencyKey,
-                );
-            }
+        foreach ($models as $model) {
+            $transactions[] = $this->toTransaction($model);
         }
 
-        // Exact replay: map existing records to Transaction DTOs and return
-        return $existing->map(fn(LedgerTransaction $tx) => $this->toDto($tx))->all();
+        return new OperationResult($operation->id, $operation->kind, $transactions);
+    }
+
+    private function conn(): Connection
+    {
+        return DB::connection($this->connectionOverride);
     }
 }

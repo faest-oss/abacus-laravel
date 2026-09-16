@@ -1,16 +1,17 @@
 # Developer Guide: Safe Stream Heads, Locking, and Versioning
 
+Status: Implemented foundation. The
+[operation guide](multi-entry-multi-stream-operations.md) defines the current
+public APIs, and the [correction guide](correction-semantics-developer-guide.md)
+supersedes this guide's earlier per-entry invariant sequencing.
+
 ## Purpose
 
 This guide defines the write protocol for item 1 in the Motor Equipment
 supplement: safe stream heads, locking, and versioning.
 
-Abacus already has the foundation for this capability. The
-`ledger_transaction_type_id` table gives every `(ledger_type, ledger_id)` pair
-a row that can be locked even before its first transaction exists. The
-implementation should retain that mechanism, rename the table to
-`ledger_stream_head`, and make the row an explicit, versioned representation
-of a stream head.
+The `ledger_stream_head` table gives every `(ledger_type, ledger_id)` pair a
+versioned row that can be locked even before its first transaction exists.
 
 This is package infrastructure. A consuming ledger should not need to create
 lock rows, choose lock order, assign versions, or retry invariant checks
@@ -91,12 +92,9 @@ required domain writes must occur in one database transaction. This allows a
 consumer to wrap an Abacus write and its projections or workflow records in a
 larger Laravel `DB::transaction()` call.
 
-The package's `setupLockRecords()` step may create missing heads immediately
-before the encompassing write transaction. An unsuccessful operation may
-therefore leave a head at version `0`. This is acceptable: a version-`0` head
-is a permanent coordination record and is functionally equivalent to an absent
-head through the public API. Its presence does not indicate that the stream has
-committed transactions.
+Abacus creates missing heads inside the encompassing write transaction. An
+unsuccessful operation therefore rolls back newly created heads along with its
+operation and transaction records.
 
 ### 2. Canonicalize the affected streams
 
@@ -107,7 +105,7 @@ duplicates, then sort tuples with `strcmp` by:
 2. `ledger_id` when the types are equal.
 
 Do not sort only by ledger ID. That works for the current same-type transfer
-but does not provide a global order for future cross-type bundles.
+but does not provide a global order for cross-type operations.
 
 ### 3. Create missing heads safely
 
@@ -189,17 +187,16 @@ optional arguments at the end of the existing method signatures:
 
 ```php
 public function post(
+    string $ledgerType,
     string $ledgerId,
     LedgerPayload $payload,
-    string $reason,
-    CarbonImmutable $effectiveAt,
+    ?PostingContext $context = null,
     ?int $expectedVersion = null,
 ): Transaction;
 
-public function void(
-    string $id,
-    string $reason,
-    ?CarbonImmutable $effectiveAt = null,
+public function reverse(
+    string $transactionId,
+    ?PostingContext $context = null,
     ?int $expectedVersion = null,
 ): Transaction;
 
@@ -207,13 +204,13 @@ public function transfer(
     LedgerPayload $payload,
     string $sourceLedgerId,
     string $destinationLedgerId,
-    CarbonImmutable $effectiveAt,
-    string $reason,
+    string $ledgerType,
+    ?PostingContext $context = null,
     ?int $expectedSourceVersion = null,
     ?int $expectedDestinationVersion = null,
 ): LedgerTransferResult;
 
-public function streamVersion(string $ledgerId): int;
+public function streamVersion(string $ledgerType, string $ledgerId): int;
 ```
 
 `streamVersion()` returns `0` when no head exists and must not create a head as
@@ -242,7 +239,7 @@ Keep the protocol in package-owned code and use Laravel's database APIs. A
 ledger implementation supplies identities, payload behavior, and invariants;
 it must not manipulate stream heads directly.
 
-Initially, focused private methods on `AbstractLedger` are sufficient for:
+Focused private methods on the `Abacus` coordinator handle:
 
 - normalizing stream tuples;
 - ensuring heads exist;
@@ -250,9 +247,8 @@ Initially, focused private methods on `AbstractLedger` are sufficient for:
 - validating expected versions; and
 - assigning the next version.
 
-Extract a dedicated internal coordinator only when the cross-ledger bundle API
-from item 3 needs to share this behavior. Do not introduce a public repository
-or driver abstraction solely for this feature.
+Do not introduce a public repository or driver abstraction solely for this
+feature.
 
 Remove the duplicate history query currently performed before
 `getAggregate()`. The invariant path should perform one replay, under the head
@@ -268,8 +264,8 @@ append routine must not create stream heads or acquire additional locks.
 The write flow is:
 
 1. Validate the inputs and normalize the affected streams.
-2. Prepare missing stream heads.
-3. Begin or join the database transaction.
+2. Begin or join the database transaction.
+3. Prepare missing stream heads.
 4. Lock every affected head.
 5. Check every expected version.
 6. Rebuild aggregates and plan every append in memory.
@@ -281,16 +277,14 @@ An internal normalization method should reject negative expected versions,
 extract the affected stream identities, remove duplicates, and return them in
 canonical order. This happens before any database work.
 
-For the current same-ledger-type API, the normalized value may be represented
-as a unique, sorted list of ledger IDs. Code intended for cross-ledger bundles
-must use complete `(ledger_type, ledger_id)` tuples.
+The coordinator always uses complete `(ledger_type, ledger_id)` tuples so
+single-stream and cross-ledger operation paths share one global lock order.
 
 ### Prepare the heads
 
 An internal preparation method should accept only normalized streams. It
 should create each missing head individually in canonical order using the
-conflict-safe behavior described above. It may run immediately before the
-write transaction and may leave version-`0` heads behind.
+conflict-safe behavior described above inside the write transaction.
 
 Preparation must not read versions, acquire locks, evaluate invariants, or
 insert transactions.
@@ -323,13 +317,12 @@ version immediately before each individual entry.
 Replay each affected stream once under its head lock. Then process the proposed
 entries in append order without writing them yet:
 
-1. Evaluate the entry's invariant against the stream's current in-memory
-   aggregate.
-2. Apply the accepted payload to that aggregate so a later entry in the same
-   operation observes it.
-3. Increment that stream's in-memory version cursor.
-4. Record the assigned version and transaction metadata in an internal append
+1. Validate and apply each payload to the stream's in-memory aggregate.
+2. Increment that stream's in-memory version cursor.
+3. Record the assigned version and transaction metadata in an internal append
    plan.
+4. Validate the completed aggregate after every entry for the stream has been
+   applied.
 
 Planning every entry before persistence ensures that expected-version and
 invariant failures occur before any immutable transaction insert. The database
@@ -347,8 +340,7 @@ acquire locks.
 
 ### Coordinator shape
 
-Initially, this separation can remain as focused private methods on
-`AbstractLedger`:
+This separation remains as focused private methods on `Abacus`:
 
 ```php
 private function normalizeStreams(array $appends): array;
@@ -373,9 +365,9 @@ private function writeMany(array $appends): array
 {
     $streams = $this->normalizeStreams($appends);
 
-    $this->prepareStreamHeads($streams);
-
     return $this->conn()->transaction(function () use ($appends, $streams) {
+        $this->prepareStreamHeads($streams);
+
         $headVersions = $this->lockStreamHeads($streams);
 
         $this->assertExpectedVersions($appends, $headVersions);
@@ -398,9 +390,7 @@ public repository or driver abstraction.
 
 - A version mismatch throws `UnexpectedStreamVersionException`; it does not
   append, increment, or partially commit another stream in the operation.
-- An invariant failure leaves all histories and existing head versions
-  unchanged. For a previously unknown stream, it may leave a head at version
-  `0`.
+- An invariant failure leaves all histories and stream heads unchanged.
 - A duplicate stream-version constraint failure is an internal consistency
   error and rolls back the operation.
 - Database deadlocks and lock timeouts remain database exceptions until an
@@ -426,9 +416,8 @@ public repository or driver abstraction.
   values and performs no write.
 - A `null` expected version appends against the locked current version.
 - An invariant failure leaves the previous head version unchanged.
-- Rolling back an outer domain transaction removes its transactions and head
-  advancement. A head created during pre-transaction setup may remain at
-  version `0`.
+- Rolling back an outer domain transaction removes its operation,
+  transactions, newly created heads, and head advancement.
 - A reversal receives the next version in the original transaction's stream.
 
 ### Multi-stream behavior
@@ -463,5 +452,5 @@ behavior must be verified rather than inferred from SQLite.
 Item 1 is complete when every write path uses this protocol, versions are
 observable through the public results, stale writers fail predictably, and the
 first-entry race is covered by a real concurrent database test. The stream
-head then becomes the foundation for later atomic bundles, idempotency, and
-snapshots without making any of those later capabilities part of this change.
+head then provides the foundation for atomic operations, idempotency, and
+snapshots.

@@ -10,19 +10,22 @@ use Faest\Abacus\Exceptions\LedgerImmutableException;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * @property string $id
  * @property string $ledger_type
  * @property string $ledger_id
  * @property int $stream_version
+ * @property string $operation_id
+ * @property int $operation_position
  * @property string $payload_type
  * @property array<mixed> $payload
  * @property string $reason
  * @property ?string $reverses_transaction_id
  * @property ?string $adjusts_transaction_id
+ * @property ?string $replaces_transaction_id
  * @property ?string $correlation_id
- * @property ?string $idempotency_key
  * @property CarbonImmutable $event_date
  * @property CarbonImmutable $system_date
  * @property CarbonImmutable $accounting_date
@@ -50,7 +53,33 @@ class LedgerTransaction extends Model
             'event_date' => 'immutable_datetime',
             'accounting_date' => 'immutable_datetime',
             'payload' => 'array',
+            'operation_position' => 'integer',
+            'stream_version' => 'integer',
         ];
+    }
+
+    /** @return BelongsTo<LedgerOperation, $this> */
+    public function operation(): BelongsTo
+    {
+        return $this->belongsTo(LedgerOperation::class, 'operation_id');
+    }
+
+    /** @return BelongsTo<LedgerTransaction, $this> */
+    public function reversedTransaction(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'reverses_transaction_id');
+    }
+
+    /** @return BelongsTo<LedgerTransaction, $this> */
+    public function replacedTransaction(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'replaces_transaction_id');
+    }
+
+    /** @return BelongsTo<LedgerTransaction, $this> */
+    public function adjustedTransaction(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'adjusts_transaction_id');
     }
 
     protected static function booted(): void

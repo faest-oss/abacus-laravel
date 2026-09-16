@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 use Carbon\CarbonImmutable;
 use Faest\Abacus\Abacus;
-use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\PostingContext;
-use Faest\Abacus\Data\TransactionDraft;
+use Faest\Abacus\Exceptions\InvalidCorrectionException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
+use Faest\Abacus\OperationBuilder;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
 use Faest\Abacus\Tests\Fixtures\TwoProcessHarness;
 use Illuminate\Database\QueryException;
@@ -26,11 +26,18 @@ beforeEach(function () {
     }
 
     $this->artisan('migrate:refresh');
-    DB::connection()->table('ledger_transaction')->truncate();
-    DB::connection()->table('ledger_stream_head')->truncate();
+    DB::connection()->table('ledger_transaction')->delete();
+    DB::connection()->table('ledger_operation')->delete();
+    DB::connection()->table('ledger_stream_head')->delete();
 });
 
 test('posts acquire an exclusive stream head lock', function () {
+    DB::connection('pgsql')->table('ledger_stream_head')->insert([
+        'ledger_type' => 'cash-account',
+        'ledger_id' => '234',
+        'version' => 0,
+    ]);
+
     $firstAbacus = (new Abacus)->registerLedger(new SimpleLedger);
     $firstAbacus->overrideConnection('pgsql');
 
@@ -41,21 +48,26 @@ test('posts acquire an exclusive stream head lock', function () {
     $lockWasContended = false;
 
     DB::connection('pgsql')->listen(function ($query) use ($secondAbacus, &$lockWasContended) {
-        if (! str_contains(strtolower($query->sql), 'for update')) {
+        if ($query->connectionName !== 'pgsql'
+            || ! str_contains(strtolower($query->sql), 'for update')) {
             return;
         }
 
         try {
-            $secondAbacus->post(stdTrans()->failIfVersionIsnt(0), stdContext());
+            $secondAbacus->post('cash-account', '234', stdPayload(), stdContext(), 0);
         } catch (QueryException $exception) {
             expect($exception->getCode())->toBe('55P03');
             $lockWasContended = true;
         }
     });
 
-    $firstAbacus->post(stdTrans(
-        payload: GenericPayload::make('deposit', ['amount' => 25]),
-    )->failIfVersionIsnt(0), stdContext());
+    $firstAbacus->post(
+        'cash-account',
+        '234',
+        GenericPayload::make('deposit', ['amount' => 25]),
+        stdContext(),
+        0,
+    );
 
     expect($lockWasContended)->toBeTrue();
     assertDatabaseCount('ledger_transaction', 1);
@@ -68,13 +80,18 @@ test('posts acquire an exclusive stream head lock', function () {
 });
 
 test('only one concurrent first post can expect version zero', function () {
-    $draft = stdTrans()->failIfVersionIsnt(0);
     $context = stdContext();
-    $post = static function () use ($draft, $context): array {
+    $post = static function () use ($context): array {
         $abacus = (new Abacus)->registerLedger(new SimpleLedger);
 
         try {
-            $transaction = $abacus->post($draft, $context);
+            $transaction = $abacus->post(
+                'cash-account',
+                '234',
+                GenericPayload::make('deposit', ['amount' => 2]),
+                $context,
+                0,
+            );
 
             return ['outcome' => 'committed', 'version' => $transaction->version];
         } catch (UnexpectedStreamVersionException $exception) {
@@ -98,12 +115,9 @@ test('only one concurrent first post can expect version zero', function () {
     expect(LedgerTransaction::query()->sole()->payload)->toBe(['amount' => 2]);
 });
 
-test('opposing post many calls acquire stream locks in the same order', function () {
-    $firstDrafts = [stdTrans('account-b'), stdTrans('account-a')];
-    $secondDrafts = [stdTrans('account-a'), stdTrans('account-b')];
-
-    $postMany = static function (array $drafts, PostingContext $context): Closure {
-        return static function () use ($drafts, $context): array {
+test('opposing operations acquire stream locks in the same order', function () {
+    $postOperation = static function (array $ledgerIds, PostingContext $context): Closure {
+        return static function () use ($ledgerIds, $context): array {
             $lockOrder = [];
 
             DB::listen(static function ($query) use (&$lockOrder) {
@@ -112,13 +126,24 @@ test('opposing post many calls acquire stream locks in the same order', function
                 }
             });
 
-            $transactions = (new Abacus)->registerLedger(new SimpleLedger)->postMany($drafts, $context);
+            $operation = (new Abacus)->registerLedger(new SimpleLedger)->operation(
+                $context,
+                function (OperationBuilder $builder) use ($ledgerIds): void {
+                    foreach ($ledgerIds as $ledgerId) {
+                        $builder->post(
+                            'cash-account',
+                            $ledgerId,
+                            GenericPayload::make('deposit', ['amount' => 2]),
+                        );
+                    }
+                },
+            );
 
             return [
                 'lockOrder' => array_slice($lockOrder, 0, 2),
                 'versions' => array_map(
                     static fn ($transaction): int => $transaction->version,
-                    $transactions,
+                    $operation->transactions,
                 ),
             ];
         };
@@ -127,8 +152,8 @@ test('opposing post many calls acquire stream locks in the same order', function
     $context = stdContext();
 
     $results = TwoProcessHarness::run(
-        $postMany($firstDrafts, $context),
-        $postMany($secondDrafts, $context),
+        $postOperation(['account-b', 'account-a'], $context),
+        $postOperation(['account-a', 'account-b'], $context),
     );
 
     $versions = array_column($results, 'versions');
@@ -151,13 +176,93 @@ test('opposing post many calls acquire stream locks in the same order', function
     ]);
 });
 
-function stdTrans(string $ledgerId = '234', ?LedgerPayload $payload = null): TransactionDraft
+test('concurrent reversals commit exactly one reversal', function () {
+    $original = (new Abacus)
+        ->registerLedger(new SimpleLedger)
+        ->post('cash-account', '234', stdPayload(), stdContext());
+    $context = stdContext();
+
+    $reverse = static function () use ($context, $original): string {
+        $abacus = (new Abacus)->registerLedger(new SimpleLedger);
+
+        try {
+            $abacus->reverse($original->id, $context);
+
+            return 'committed';
+        } catch (InvalidCorrectionException) {
+            return 'already-reversed';
+        }
+    };
+
+    $results = TwoProcessHarness::run($reverse, $reverse);
+
+    expect($results)->toContain('committed')->toContain('already-reversed');
+    assertDatabaseCount('ledger_operation', 2);
+    assertDatabaseCount('ledger_transaction', 2);
+});
+
+test('concurrent replacements commit exactly one complete replacement', function () {
+    $original = (new Abacus)
+        ->registerLedger(new SimpleLedger)
+        ->post(
+            'cash-account',
+            '234',
+            GenericPayload::make('deposit', ['amount' => 100]),
+            stdContext(),
+        );
+    $context = stdContext();
+
+    $replace = static function () use ($context, $original): string {
+        $abacus = (new Abacus)->registerLedger(new SimpleLedger);
+
+        try {
+            $abacus->replace(
+                $original->id,
+                GenericPayload::make('deposit', ['amount' => 120]),
+                $context,
+            );
+
+            return 'committed';
+        } catch (InvalidCorrectionException) {
+            return 'already-reversed';
+        }
+    };
+
+    $results = TwoProcessHarness::run($replace, $replace);
+
+    expect($results)->toContain('committed')->toContain('already-reversed');
+    assertDatabaseCount('ledger_operation', 2);
+    assertDatabaseCount('ledger_transaction', 3);
+});
+
+test('concurrent idempotent posts return one committed operation', function () {
+    $context = stdContext()->withIdempotencyKey('concurrent:post');
+    $post = static function () use ($context): array {
+        $transaction = (new Abacus)
+            ->registerLedger(new SimpleLedger)
+            ->post(
+                'cash-account',
+                '234',
+                GenericPayload::make('deposit', ['amount' => 2]),
+                $context,
+                0,
+            );
+
+        return [$transaction->operationId, $transaction->id];
+    };
+
+    $results = TwoProcessHarness::run($post, $post);
+
+    expect($results[0])->toBe($results[1]);
+    assertDatabaseCount('ledger_operation', 1);
+    assertDatabaseCount('ledger_transaction', 1);
+});
+
+function stdPayload(): GenericPayload
 {
-    $payload = $payload ? $payload : GenericPayload::make('deposit', [
+    return GenericPayload::make('deposit', [
         'amount' => 2,
     ]);
-
-    return TransactionDraft::make('cash-account', $ledgerId, $payload);
 }
 
 function stdContext(): PostingContext

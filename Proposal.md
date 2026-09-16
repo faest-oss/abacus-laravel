@@ -1,6 +1,11 @@
 Ledger Toolkit for Laravel
 ---------------------------
 
+> **Status:** This is the original design proposal. The current write APIs and
+> correction semantics are documented in
+> [multi-entry-multi-stream-operations.md](multi-entry-multi-stream-operations.md)
+> and [correction-semantics-developer-guide.md](correction-semantics-developer-guide.md).
+
 A ledger is an append-only, authoritative record of facts or transactions where previously recorded entries are never modified or removed; fixing past entries requires recording new entries.
 
 The key value add of a ledger is the ability to audit and understand how the present system state came to be. Ledgers allow you to recreate the state of the system at arbitrary points in time using bi-temporal timelines.
@@ -81,17 +86,20 @@ class UtilityBillingLedger extends BaseLedger
     // Optional: Define allowed transaction types
     protected array $allowedTypes = ['charge', 'payment', 'adjustment'];
 
-    /**
-     * The Aggregate Pattern: Run before committing a new entry.
-     * Throws an exception if the new event violates business rules.
-     */
-    public function assertInvariants(Collection $historicalEntries, array $newPayload): void
+    public function assertValidPayload(LedgerPayload $payload): void
     {
-        $currentBalance = $historicalEntries->sum('payload.amount');
-        $newBalance = $currentBalance + $newPayload['amount'];
+        if (! is_numeric($payload->jsonSerialize()['amount'] ?? null)) {
+            throw new InvalidPayloadException('Utility entries require a numeric amount.');
+        }
+    }
 
-        if ($newBalance < 0 && $newPayload['type'] === 'charge') {
-            throw new InvariantViolationException("Utility balances cannot drop below zero from a charge.");
+    /**
+     * Runs against the final aggregate produced by the complete operation.
+     */
+    public function assertAggregateInvariants(array|JsonSerializable $aggregate): void
+    {
+        if ($aggregate['balance'] < 0) {
+            throw new InvariantViolationException('Utility balances cannot be negative.');
         }
     }
 }
@@ -122,7 +130,7 @@ class LedgerOrchestrator
     /**
      * @param AbstractLedger[] $ledgers
      */
-    public static function bundle(array $ledgers, Closure $actions)
+    public static function operation(array $ledgers, Closure $actions)
     {
         return DB::transaction(function () use ($ledgers, $actions) {
             $correlationId = (string) Str::uuid();
@@ -159,7 +167,7 @@ class WalkInPaymentService
         $drawer = new CashDrawerLedger($drawerId);
         $ar = new AccountsReceivableLedger($arAccountId);
 
-        LedgerOrchestrator::bundle([$drawer, $ar], function (string $correlationId) use (...) {
+        LedgerOrchestrator::operation([$drawer, $ar], function (string $correlationId) use (...) {
             
             // Leg 1: Cash increases in the physical drawer
             $drawer->post(
@@ -208,4 +216,3 @@ The abstract ledger implementations can resolve the PeriodManager provided by th
 ```php
 app(PeriodManager::class)->assertDateIsOpen($accountingDate, $this->ledgerType);
 ```
-

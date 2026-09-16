@@ -7,7 +7,6 @@ namespace Faest\Abacus\Data;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Str;
 use InvalidArgumentException;
 
 final readonly class PostingContext
@@ -88,7 +87,7 @@ final readonly class PostingContext
             eventDate: CarbonImmutable::instance($eventDate),
             accountingDate: CarbonImmutable::instance($accountingDate),
             reason: $reason,
-            correlationId: (string) Str::orderedUuid(),
+            correlationId: null,
             idempotencyKey: "import:{$sourceName}:{$externalBatchId}",
         );
     }

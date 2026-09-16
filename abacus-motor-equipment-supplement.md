@@ -24,7 +24,7 @@ domain.
 
 Abacus should become the reusable append-only transaction kernel. It should own
 the safe write protocol, immutable transaction metadata, transaction
-relationships, atomic bundles, concurrency control, idempotency, and temporal
+relationships, atomic operations, concurrency control, idempotency, and temporal
 query primitives. Motor Equipment should continue to own the meaning of each
 operation: effective vehicle context, rate and account validation, correction
 eligibility, Accounts Payable disposition, and report classification.
@@ -104,7 +104,7 @@ Accounts Payable rather than asking Abacus to understand AP claims.
 
 ### 1. First-Class Atomic Operations
 
-Provide an operation or bundle API that supports posting one or more entries
+Provide an operation API that supports posting one or more entries
 across one or more ledger streams. An operation should:
 
 - Generate or accept a correlation or operation ID.
@@ -127,7 +127,7 @@ Convenient operations may include:
 - `postMany` for several entries in one stream;
 - `reverse` for an exact opposing transaction;
 - `replace` for an atomic reversal and replacement; and
-- `bundle` for arbitrary multi-stream operations.
+- `operation` with `OperationBuilder` for arbitrary multi-stream operations.
 
 ### 2. Safe Stream Locking and Versioning
 
@@ -145,7 +145,7 @@ increasing version. This provides:
 - A foundation for snapshots without making them authoritative.
 - A stable target for database-level relationships and operational inspection.
 
-Stream-head creation must itself be race-safe, and bundle locking should sort
+Stream-head creation must itself be race-safe, and operation locking should sort
 by ledger type and ledger ID before acquiring locks.
 
 ### 3. Explicit Posting Context
@@ -381,7 +381,7 @@ domains, prioritize:
 2. Explicit posting context and toolkit-owned recorded time.
 3. Atomic multi-entry and multi-stream operations.
 4. Idempotency and source identity.
-5. Exact reversal and replacement semantics.
+5. [Exact reversal and replacement semantics](correction-semantics-developer-guide.md).
 6. Typed payloads and required synchronous projections.
 7. Temporal query and aggregate APIs.
 8. Period management, snapshots, optional routes, and other conveniences.

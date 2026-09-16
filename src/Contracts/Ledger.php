@@ -25,12 +25,10 @@ interface Ledger
      */
     public function applyToAggregate(LedgerPayload $payload, array|JsonSerializable $existingAggregate): array|JsonSerializable;
 
-    /**
-     * Invariant check: throw FailedInvariantException if business rule is violated.
-     *
-     * @param  array<mixed>|JsonSerializable  $aggregate
-     */
-    public function assertInvariants(LedgerPayload $payload, array|JsonSerializable $aggregate): void;
+    public function assertValidPayload(LedgerPayload $payload): void;
+
+    /** @param array<mixed>|JsonSerializable $aggregate */
+    public function assertAggregateInvariants(array|JsonSerializable $aggregate): void;
 
     /**
      * Compute the opposing payload for full reversals.

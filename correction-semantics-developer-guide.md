@@ -1,12 +1,12 @@
 # Implementation Guide: Corrections and Operation Views
 
-Status: Proposed implementation specification
+Status: Implemented specification
 
 ## 1. Purpose and agreed semantics
 
 This guide defines the implementation of priority #5, exact reversal and
 replacement semantics, from the [Motor Equipment supplement](abacus-motor-equipment-supplement.md).
-It describes proposed package behavior, not APIs that are already implemented.
+It describes the package's implemented correction and operation behavior.
 
 Abacus will provide explicit reversal, replacement, and adjustment
 relationships, backed by atomic operations. Consumers can inspect either a
@@ -40,8 +40,8 @@ The following decisions are fixed:
 Add an immutable `ledger_operation` table containing:
 
 - Toolkit-generated ULID primary key.
-- Operation kind, determined by the initiating API: posting, batch, bundle,
-  reversal, replacement, adjustment, transfer, or operation reversal.
+- Operation kind, derived from the staged actions: posting, reversal,
+  replacement, adjustment, transfer, operation reversal, or composite.
 - Actor, reason, event date, accounting date, optional correlation ID, and
   context metadata.
 - Toolkit-assigned `system_date`, retaining the existing name for recorded time.
@@ -84,8 +84,33 @@ idempotency storage and uniqueness from entries to operations.
 
 ### Public write APIs
 
-Retain the existing return shapes for `post()`, `postMany()`, `bundle()`,
-`reverse()`, `void()`, and `transfer()`.
+`post()` accepts one ledger type, ledger ID, and payload. `postMany()` accepts a
+nonempty payload list for one ledger type and ledger ID. Both create a posting
+operation while returning transaction results for convenience.
+
+Use `operation()` with `OperationBuilder` for arbitrary multi-stream work and
+correction workflows:
+
+```php
+$result = Abacus::operation($context, function (OperationBuilder $operation) {
+    $operation->reverse($originalId);
+    $operation->post(VehicleEquityLedger::class, $vehicleId, $replacement);
+});
+```
+
+`operation()` returns `OperationResult`, containing the operation ID, derived
+`OperationKind`, and transactions in operation order. `OperationBuilder`
+supports `post`, `postMany`, `reverse`, `replace`, `adjust`, and `transfer`.
+
+The operation kind describes ledger semantics rather than which public method
+was called:
+
+- One or more ordinary postings produce `OperationKind::Posting`.
+- One reversal, replacement, adjustment, or transfer produces its matching
+  kind.
+- Multiple semantic actions, or a correction mixed with ancillary postings,
+  produce `OperationKind::Composite`.
+- `reverseOperation()` produces `OperationKind::OperationReversal`.
 
 Extend the `Transaction` result with `operationId` and `operationPosition`.
 Extend the transfer result with `operationId`.
@@ -111,23 +136,22 @@ adjust(
 `LedgerReplacementResult` exposes `operationId`, `reversalTransaction`, and
 `replacementTransaction`.
 
-Add corresponding fluent `replace()` and `adjust()` methods to `BundleBuilder`.
-Each expands into entries within the enclosing bundle; it does not create a
-nested operation. Preserve caller order, with a replacement's reversal
-immediately preceding its new entry.
+The builder stages semantic intent rather than caller-constructed transaction
+relationships. Abacus resolves targets and creates relationship fields through
+the shared coordinator. A replacement's reversal immediately precedes its new
+entry.
 
-Extend drafts with adjustment and replacement relationships. All manually
-constructed drafts receive the same validation as convenience helpers.
-
-Keep `void()` as an alias for exact reversal. Add an optional trailing expected
-version to `reverse()`.
+`reverse()` accepts an optional trailing expected version. `Transaction`
+exposes `operationId` and `operationPosition`; replacement and transfer results
+also expose their operation ID.
 
 Change `reverseOperation()` to accept an **operation ID**. It reverses every
 entry of that operation together, or fails entirely. Reject an operation
 containing reversal entries or any entry already reversed; never silently
 select only an eligible subset.
 
-An empty batch or bundle returns an empty result and creates no operation.
+An empty `postMany()` or `operation()` call throws `EmptyOperationException`
+and creates no operation.
 
 ## 3. Validation and atomic write protocol
 
@@ -180,8 +204,6 @@ Under the affected stream locks:
 - Reject targets already reversed, including duplicates staged within the
   current operation.
 - Compute reversal payloads through the target ledger's `computeOpposing()`.
-- For manually supplied reversal drafts, compare payload type and canonical
-  serialized content with the computed opposing payload.
 - Require every replacement entry to have exactly one matching reversal in the
   same operation.
 - Reject adjustment relationships targeting reversal entries.
@@ -221,8 +243,8 @@ Each entry still advances its stream version by one. Failed writes leave no
 operation, entries, or advanced versions.
 
 Two separate Abacus calls inside one outer Laravel transaction remain separate
-operations with separate invariant checks. Use one bundle when all entries
-must participate in the same validation boundary.
+operations with separate invariant checks. Use one `operation()` call when all
+entries must participate in the same validation boundary.
 
 Domain workflow records may be written in the same outer transaction and
 connection. A returned result remains provisional until that outer transaction
@@ -327,9 +349,8 @@ constraints, and package namespace. Add no dependencies.
 The earlier [stream-head](safe-stream-heads-developer-guide.md) and
 [multi-entry](multi-entry-multi-stream-operations.md) guides describe per-entry
 invariant checks and correlation-based grouping. Add explicit supersession
-notes linking to this guide. Update README and the bundled Boost skill when
-the APIs are implemented, keeping proposed APIs out of current consumer
-instructions.
+notes linking to this guide. README and the bundled Boost skill document the
+implemented public integration surface.
 
 Acceptance tests must demonstrate:
 
@@ -343,8 +364,8 @@ Acceptance tests must demonstrate:
   aggregate fails.
 - Failure in any participating stream rolls back every entry, operation record,
   retry claim, and head advancement.
-- All write paths, including raw drafts and bundles, enforce identical
-  correction rules.
+- All write paths, including dedicated helpers and composed operations, enforce
+  identical correction rules.
 - Identical keyed retries return the original operation and ordered entry IDs;
   changed targets, payloads, order, or context conflict.
 - Concurrent reversals yield one committed reversal; concurrent replacements

@@ -63,9 +63,44 @@ php artisan vendor:publish --tag="abacus-assets"
 
 ```php
 use Faest\Abacus\Abacus;
+use Faest\Abacus\Data\PostingContext;
+use Faest\Abacus\OperationBuilder;
 
 $abacus = app(Abacus::class);
+$abacus->registerLedger(new VehicleEquityLedger);
+
+$context = PostingContext::forProcess(
+    processName: 'monthly-rent',
+    eventDate: now(),
+    accountingDate: now(),
+    reason: 'Post monthly vehicle rent',
+    idempotencyKey: 'monthly-rent:2026-09:vehicle-101',
+);
+
+$transaction = $abacus->post(
+    VehicleEquityLedger::class,
+    'vehicle-101',
+    new RentPosted(amount: 50000),
+    $context,
+);
 ```
+
+Use `postMany()` for several ordinary entries in one stream. Use
+`operation()` when one atomic write spans streams or combines posting,
+reversal, replacement, adjustment, or transfer actions:
+
+```php
+$operation = $abacus->operation($context, function (OperationBuilder $operation) use ($original, $replacement) {
+    $operation->replace($original->id, $replacement);
+    $operation->post(GeneralLedger::class, 'fleet-expense', new ExpensePosted(amount: 50000));
+});
+```
+
+Every write creates an immutable operation record. Transaction results expose
+their operation ID, operation position, and stream version. See the
+[operation guide](multi-entry-multi-stream-operations.md) and
+[correction guide](correction-semantics-developer-guide.md) for the complete
+write protocol.
 
 ## Changelog
 
