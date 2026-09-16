@@ -19,7 +19,10 @@ final class PayloadFingerprint
 
         $sort = function (mixed &$item) use (&$sort): void {
             if (is_array($item)) {
-                ksort($item);
+                if (! array_is_list($item)) {
+                    ksort($item);
+                }
+
                 foreach ($item as &$value) {
                     $sort($value);
                 }

@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Faest\Abacus\Exceptions;
 
 use Exception;
-use Faest\Abacus\Data\TransactionDraft;
 use Throwable;
 
 // use Illuminate\Http\Request;
@@ -15,16 +14,12 @@ class FailedInvariantException extends Exception
 {
     public function __construct(
         string $message,
-        private TransactionDraft $failedDraft,
+        public readonly string $ledgerType,
+        public readonly string $ledgerId,
         int $code = 0,
         ?Throwable $previous = null,
     ) {
         parent::__construct($message, $code, $previous);
-    }
-
-    public function getFailedDraft(): TransactionDraft
-    {
-        return $this->failedDraft;
     }
 
     /**

@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
+use Faest\Abacus\Enums\OperationKind;
 use Faest\Abacus\Exceptions\LedgerImmutableException;
+use Faest\Abacus\Models\LedgerOperation;
 use Faest\Abacus\Models\LedgerTransaction;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
@@ -17,7 +19,11 @@ function createLedgerTransaction(bool $createStreamHead = true): LedgerTransacti
         ]);
     }
 
+    $operation = createLedgerOperation();
+
     $transaction = new LedgerTransaction;
+    $transaction->operation_id = $operation->id;
+    $transaction->operation_position = 1;
     $transaction->ledger_type = 'utility-billing';
     $transaction->ledger_id = 'account-123';
     $transaction->payload = json_encode(['type' => 'charge', 'amount' => 1250], JSON_THROW_ON_ERROR);
@@ -31,6 +37,23 @@ function createLedgerTransaction(bool $createStreamHead = true): LedgerTransacti
     $transaction->save();
 
     return $transaction;
+}
+
+function createLedgerOperation(): LedgerOperation
+{
+    $operation = new LedgerOperation;
+    $operation->kind = OperationKind::Posting;
+    $operation->actor = 'user-456';
+    $operation->reason = 'testing';
+    $operation->event_date = Carbon::parse('2026-01-15 09:30:00');
+    $operation->accounting_date = Carbon::parse('2026-01-15 10:00:00');
+    $operation->system_date = Carbon::parse('2026-01-15 10:00:00');
+    $operation->metadata = [];
+    $operation->request_fingerprint_version = 1;
+    $operation->request_fingerprint = str_repeat('a', 64);
+    $operation->save();
+
+    return $operation;
 }
 
 it('persists a ledger transaction with a ULID and no updated timestamp', function () {
@@ -88,4 +111,17 @@ it('prevents a ledger transaction from being deleted', function () {
 
     expect(fn () => $transaction->delete())
         ->toThrow(LedgerImmutableException::class, 'Ledger entries cannot be deleted.');
+});
+
+it('prevents a ledger operation from being updated or deleted', function () {
+    $operation = createLedgerOperation();
+    $operation->reason = 'changed';
+
+    expect(fn () => $operation->save())
+        ->toThrow(LedgerImmutableException::class, 'Ledger operations cannot be modified.');
+
+    $operation->refresh();
+
+    expect(fn () => $operation->delete())
+        ->toThrow(LedgerImmutableException::class, 'Ledger operations cannot be deleted.');
 });

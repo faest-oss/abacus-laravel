@@ -37,18 +37,21 @@ final class SimpleLedger implements Ledger
         return $existingAggregate;
     }
 
-    /**
-     * @param  array<mixed>|JsonSerializable  $aggregate
-     */
-    public function assertInvariants(
-        LedgerPayload $payload,
-        array|JsonSerializable $aggregate,
-    ): void {
-        if (! $payload instanceof GenericPayload || ! is_array($aggregate)) {
+    public function assertValidPayload(LedgerPayload $payload): void
+    {
+        if (! $payload instanceof GenericPayload) {
+            throw new Exception('must be arrays');
+        }
+    }
+
+    /** @param array<mixed>|JsonSerializable $aggregate */
+    public function assertAggregateInvariants(array|JsonSerializable $aggregate): void
+    {
+        if (! is_array($aggregate)) {
             throw new Exception('must be arrays');
         }
 
-        if ($aggregate['total'] + $payload->payload()['amount'] < 0) {
+        if ($aggregate['total'] < 0) {
             throw new Exception('Cannot be negative');
         }
     }
