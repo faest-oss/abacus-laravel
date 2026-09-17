@@ -379,10 +379,10 @@ domains, prioritize:
 
 1. [Safe stream heads, locking, and versioning](safe-stream-heads-developer-guide.md).
 2. Explicit posting context and toolkit-owned recorded time.
-3. Atomic multi-entry and multi-stream operations.
+3. [Atomic multi-entry and multi-stream operations](multi-entry-multi-stream-operations.md).
 4. Idempotency and source identity.
 5. [Exact reversal and replacement semantics](correction-semantics-developer-guide.md).
-6. Typed payloads and required synchronous projections.
+6. [Typed payloads and required synchronous projections](typed-payloads-and-synchronous-projections-developer-guide.md).
 7. Temporal query and aggregate APIs.
 8. Period management, snapshots, optional routes, and other conveniences.
 

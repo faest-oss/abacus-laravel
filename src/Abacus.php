@@ -48,6 +48,12 @@ final class Abacus
 
     private ?int $lockTimeout = null;
 
+    public function __construct(
+        private PayloadRegistry $payloadRegistry,
+    ) {
+        //
+    }
+
     public function registerLedger(Ledger $ledger): self
     {
         $this->ledgerRegistry[$ledger->getLedgerType()] = $ledger;
@@ -73,6 +79,20 @@ final class Abacus
         throw new InvalidArgumentException("Unregistered or invalid ledger type: {$ledgerType}");
     }
 
+    public function registerPayload(string $type, string $payloadClass): self
+    {
+        $this->payloadRegistry->register($type, $payloadClass);
+        return $this;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    public function deserialize(string $type, array $data): LedgerPayload
+    {
+        return $this->payloadRegistry->deserialize($type, $data);
+    }
+
     public function findTransaction(string $transactionId): ?LedgerTransaction
     {
         return $this->ledgerTranQuery()->find($transactionId);
@@ -91,7 +111,7 @@ final class Abacus
         $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
 
         return $this->operationQuery()
-            ->whereHas('transactions', fn (Builder $query) => $query
+            ->whereHas('transactions', fn(Builder $query) => $query
                 ->where('ledger_type', $canonicalType)
                 ->where('ledger_id', $ledgerId))
             ->with('transactions')
@@ -155,7 +175,7 @@ final class Abacus
         ?int $expectedVersion = null,
     ): array {
         $actions = array_map(
-            fn (LedgerPayload $payload): OperationAction => OperationAction::post(
+            fn(LedgerPayload $payload): OperationAction => OperationAction::post(
                 $ledgerType,
                 $ledgerId,
                 $payload,
@@ -186,7 +206,7 @@ final class Abacus
             throw new InvalidArgumentException('An operation callback must be provided.');
         }
 
-        $builder = new OperationBuilder;
+        $builder = new OperationBuilder();
         $callback($builder);
 
         return $this->executeOperation($builder->actions(), $context);
@@ -344,7 +364,7 @@ final class Abacus
         ?string $reversesOperationId = null,
     ): OperationResult {
         if ($actions === []) {
-            throw new EmptyOperationException;
+            throw new EmptyOperationException();
         }
 
         $actions = $this->normalizeActions($actions);
@@ -496,7 +516,7 @@ final class Abacus
             'metadata' => $context->metadata,
             'correlation_id' => $context->correlationId,
             'reverses_operation_id' => $reversesOperationId,
-            'actions' => array_map(fn (OperationAction $action): array => [
+            'actions' => array_map(fn(OperationAction $action): array => [
                 'kind' => $action->kind->value,
                 'ledger_type' => $action->ledgerType,
                 'ledger_id' => $action->ledgerId,
@@ -518,7 +538,7 @@ final class Abacus
         CarbonImmutable $recordedAt,
         ?string $reversesOperationId,
     ): array {
-        $operation = new LedgerOperation;
+        $operation = new LedgerOperation();
         $operation->setConnection($this->connectionOverride);
         $operation->kind = $kind;
         $operation->actor = $context->actor;
@@ -534,7 +554,7 @@ final class Abacus
         $operation->reverses_operation_id = $reversesOperationId;
 
         try {
-            $this->conn()->transaction(fn () => $operation->save());
+            $this->conn()->transaction(fn() => $operation->save());
 
             return [$operation, false];
         } catch (QueryException $exception) {
@@ -748,7 +768,7 @@ final class Abacus
             $streams[] = [$target->ledger_type, $target->ledger_id];
         }
 
-        usort($streams, fn (array $left, array $right): int => strcmp($left[0], $right[0]) ?: strcmp($left[1], $right[1]));
+        usort($streams, fn(array $left, array $right): int => strcmp($left[0], $right[0]) ?: strcmp($left[1], $right[1]));
 
         return array_values(array_unique($streams, SORT_REGULAR));
     }
@@ -944,7 +964,7 @@ final class Abacus
         }
 
         foreach ($appends as $append) {
-            $transaction = new LedgerTransaction;
+            $transaction = new LedgerTransaction();
             $transaction->setConnection($this->connectionOverride);
             $transaction->operation_id = $operation->id;
             $transaction->operation_position = $append->operationPosition;
