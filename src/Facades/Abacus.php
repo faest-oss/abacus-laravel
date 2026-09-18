@@ -7,6 +7,9 @@ namespace Faest\Abacus\Facades;
 use Closure;
 use Faest\Abacus\Contracts\Ledger;
 use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Contracts\OperationProjector;
+use Faest\Abacus\Contracts\Projector;
+use Faest\Abacus\Contracts\ReplayableProjector;
 use Faest\Abacus\Data\LedgerReplacementResult;
 use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\OperationResult;
@@ -20,6 +23,11 @@ use JsonSerializable;
 
 /**
  * @method static \Faest\Abacus\Abacus registerLedger(Ledger $ledger)
+ * @method static \Faest\Abacus\Abacus registerPayload(string $type, string $payloadClass)
+ * @method static LedgerPayload deserializePayload(string $type, array<string, mixed> $data)
+ * @method static \Faest\Abacus\Abacus registerProjector(string $ledgerType, string|Projector $projector)
+ * @method static \Faest\Abacus\Abacus registerOperationProjector(string $ledgerType, string|OperationProjector $projector)
+ * @method static int rebuildProjection(string|ReplayableProjector $projector, string $ledgerType, int $chunkSize = 1000)
  * @method static Ledger resolveLedger(string $ledgerType)
  * @method static array<mixed>|JsonSerializable getAggregate(string $ledgerType, string $ledgerId)
  * @method static array<mixed>|JsonSerializable getAggregateAtOperation(string $ledgerType, string $ledgerId, string $operationId)

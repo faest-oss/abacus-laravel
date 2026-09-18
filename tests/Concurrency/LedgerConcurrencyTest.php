@@ -10,6 +10,7 @@ use Faest\Abacus\Exceptions\InvalidCorrectionException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\OperationBuilder;
+use Faest\Abacus\PayloadRegistry;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
 use Faest\Abacus\Tests\Fixtures\TwoProcessHarness;
 use Illuminate\Database\QueryException;
@@ -38,10 +39,10 @@ test('posts acquire an exclusive stream head lock', function () {
         'version' => 0,
     ]);
 
-    $firstAbacus = (new Abacus)->registerLedger(new SimpleLedger);
+    $firstAbacus = (new Abacus(new PayloadRegistry))->registerLedger(new SimpleLedger);
     $firstAbacus->overrideConnection('pgsql');
 
-    $secondAbacus = (new Abacus)->registerLedger(new SimpleLedger);
+    $secondAbacus = (new Abacus(new PayloadRegistry))->registerLedger(new SimpleLedger);
     $secondAbacus->overrideConnection('pgsql2');
     $secondAbacus->overrideLockTimeout(0);
 
@@ -82,7 +83,7 @@ test('posts acquire an exclusive stream head lock', function () {
 test('only one concurrent first post can expect version zero', function () {
     $context = stdContext();
     $post = static function () use ($context): array {
-        $abacus = (new Abacus)->registerLedger(new SimpleLedger);
+        $abacus = (new Abacus(new PayloadRegistry))->registerLedger(new SimpleLedger);
 
         try {
             $transaction = $abacus->post(
@@ -126,7 +127,7 @@ test('opposing operations acquire stream locks in the same order', function () {
                 }
             });
 
-            $operation = (new Abacus)->registerLedger(new SimpleLedger)->operation(
+            $operation = (new Abacus(new PayloadRegistry))->registerLedger(new SimpleLedger)->operation(
                 $context,
                 function (OperationBuilder $builder) use ($ledgerIds): void {
                     foreach ($ledgerIds as $ledgerId) {
@@ -177,13 +178,13 @@ test('opposing operations acquire stream locks in the same order', function () {
 });
 
 test('concurrent reversals commit exactly one reversal', function () {
-    $original = (new Abacus)
+    $original = (new Abacus(new PayloadRegistry))
         ->registerLedger(new SimpleLedger)
         ->post('cash-account', '234', stdPayload(), stdContext());
     $context = stdContext();
 
     $reverse = static function () use ($context, $original): string {
-        $abacus = (new Abacus)->registerLedger(new SimpleLedger);
+        $abacus = (new Abacus(new PayloadRegistry))->registerLedger(new SimpleLedger);
 
         try {
             $abacus->reverse($original->id, $context);
@@ -202,7 +203,7 @@ test('concurrent reversals commit exactly one reversal', function () {
 });
 
 test('concurrent replacements commit exactly one complete replacement', function () {
-    $original = (new Abacus)
+    $original = (new Abacus(new PayloadRegistry))
         ->registerLedger(new SimpleLedger)
         ->post(
             'cash-account',
@@ -213,7 +214,7 @@ test('concurrent replacements commit exactly one complete replacement', function
     $context = stdContext();
 
     $replace = static function () use ($context, $original): string {
-        $abacus = (new Abacus)->registerLedger(new SimpleLedger);
+        $abacus = (new Abacus(new PayloadRegistry))->registerLedger(new SimpleLedger);
 
         try {
             $abacus->replace(
@@ -238,7 +239,7 @@ test('concurrent replacements commit exactly one complete replacement', function
 test('concurrent idempotent posts return one committed operation', function () {
     $context = stdContext()->withIdempotencyKey('concurrent:post');
     $post = static function () use ($context): array {
-        $transaction = (new Abacus)
+        $transaction = (new Abacus(new PayloadRegistry))
             ->registerLedger(new SimpleLedger)
             ->post(
                 'cash-account',

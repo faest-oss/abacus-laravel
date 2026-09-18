@@ -34,7 +34,13 @@ individual `abacus-*` tag such as `abacus-config` or `abacus-migrations`.
 Register each ledger implementation with `Abacus::registerLedger()`. A ledger
 implements `Faest\Abacus\Contracts\Ledger`, including deterministic payload
 reduction, payload validation, completed-aggregate invariant validation,
-opposing-payload calculation, and payload deserialization.
+and opposing-payload calculation.
+
+Implement payloads with `LedgerPayload`. Historical typed payloads also
+implement `DeserializablePayload`; register their stable global type names in
+`config('abacus.payloads')` or with `Abacus::registerPayload()`. Implement
+`HasMoneyAmount` for financial payloads using integer minor units and uppercase
+three-letter currency codes.
 
 Use `PostingContext::forUser()`, `forProcess()`, or `forImport()` to supply the
 actor, event date, accounting date, reason, and optional operation idempotency
@@ -51,6 +57,23 @@ Choose the narrowest write API:
 Every write creates an immutable operation. Use the transaction result's
 `operationId` to retrieve it with `findOperation()`.
 
+Register required synchronous `Projector` or `OperationProjector`
+implementations against a ledger type. They run inside the Abacus write
+transaction and must use the supplied connection for rollback-safe writes.
+Ledgers may alternatively declare them through `HasProjectors`.
+
+Use `ReplayableProjector` only for disposable reporting views. Pause writes for
+the selected ledger, then call `Abacus::rebuildProjection()` or run:
+
+```bash
+php artisan abacus:projection:rebuild \
+    "App\Projectors\VehicleMonthlyEquitySummaryProjector" \
+    --ledger="vehicle-equity" \
+    --chunk=500
+```
+
+Production rebuilds require confirmation unless `--force` is supplied.
+
 ## Rules, References, and Templates
 
 Read before executing:
@@ -62,6 +85,11 @@ Read before executing:
 ```php
 $abacus = app(\Faest\Abacus\Abacus::class);
 $abacus->registerLedger(new VehicleEquityLedger);
+$abacus->registerPayload(HourlyUseRecorded::TYPE, HourlyUseRecorded::class);
+$abacus->registerProjector(
+    VehicleEquityLedger::class,
+    HourlyUseSnapshotProjector::class,
+);
 
 $transaction = $abacus->post(
     VehicleEquityLedger::class,
@@ -78,3 +106,7 @@ $transaction = $abacus->post(
   `operation()`
 - do not construct reversal payloads manually; use the correction APIs so
   Abacus computes and validates their relationships
+- do not perform remote calls or dispatch pre-commit work from required
+  projectors
+- do not use replayable projections for authoritative workflow records, and do
+  not rebuild while writes for the selected ledger continue

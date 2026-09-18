@@ -62,12 +62,6 @@ final class RestrictedCorrectionLedger implements CorrectionPolicy, Ledger
         ]);
     }
 
-    /** @param array<mixed> $payload */
-    public function deserialize(string $eventType, array $payload): LedgerPayload
-    {
-        return GenericPayload::make($eventType, $payload);
-    }
-
     public function assertCorrectionAllowed(CorrectionContext $context): void
     {
         if ($context->kind === OperationKind::Adjustment) {

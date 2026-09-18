@@ -7,8 +7,14 @@ namespace Faest\Abacus;
 use Carbon\CarbonImmutable;
 use Closure;
 use Faest\Abacus\Contracts\CorrectionPolicy;
+use Faest\Abacus\Contracts\DeserializablePayload;
+use Faest\Abacus\Contracts\HasMoneyAmount;
+use Faest\Abacus\Contracts\HasProjectors;
 use Faest\Abacus\Contracts\Ledger;
 use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Contracts\OperationProjector;
+use Faest\Abacus\Contracts\Projector;
+use Faest\Abacus\Contracts\ReplayableProjector;
 use Faest\Abacus\Data\Append;
 use Faest\Abacus\Data\CorrectionContext;
 use Faest\Abacus\Data\LedgerReplacementResult;
@@ -25,6 +31,7 @@ use Faest\Abacus\Exceptions\InvalidCorrectionException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerOperation;
 use Faest\Abacus\Models\LedgerTransaction;
+use Faest\Abacus\Support\CanonicalJson;
 use Faest\Abacus\Support\PayloadFingerprint;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
@@ -44,6 +51,12 @@ final class Abacus
     /** @var array<string, Ledger> */
     private array $ledgerRegistry = [];
 
+    /** @var array<string, list<class-string<Projector>|Projector>> */
+    private array $projectorRegistry = [];
+
+    /** @var list<array{ledgerType: string, projector: class-string<OperationProjector>|OperationProjector}> */
+    private array $operationProjectorRegistry = [];
+
     private ?string $connectionOverride = null;
 
     private ?int $lockTimeout = null;
@@ -58,6 +71,30 @@ final class Abacus
     {
         $this->ledgerRegistry[$ledger->getLedgerType()] = $ledger;
         $this->ledgerRegistry[$ledger::class] = $ledger;
+
+        if ($ledger instanceof HasProjectors) {
+            foreach ($ledger->projectors() as $projector) {
+                $registered = false;
+
+                if ($projector instanceof Projector
+                    || (is_string($projector) && is_subclass_of($projector, Projector::class))) {
+                    /** @var class-string<Projector>|Projector $projector */
+                    $this->addProjector($ledger->getLedgerType(), $projector);
+                    $registered = true;
+                }
+
+                if ($projector instanceof OperationProjector
+                    || (is_string($projector) && is_subclass_of($projector, OperationProjector::class))) {
+                    /** @var class-string<OperationProjector>|OperationProjector $projector */
+                    $this->addOperationProjector($ledger->getLedgerType(), $projector);
+                    $registered = true;
+                }
+
+                if (! $registered) {
+                    throw new InvalidArgumentException('Ledger projectors must implement a required projector contract.');
+                }
+            }
+        }
 
         return $this;
     }
@@ -79,18 +116,143 @@ final class Abacus
         throw new InvalidArgumentException("Unregistered or invalid ledger type: {$ledgerType}");
     }
 
+    /** @param class-string<DeserializablePayload> $payloadClass */
     public function registerPayload(string $type, string $payloadClass): self
     {
         $this->payloadRegistry->register($type, $payloadClass);
+
         return $this;
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
-    public function deserialize(string $type, array $data): LedgerPayload
+    public function deserializePayload(string $type, array $data): LedgerPayload
     {
         return $this->payloadRegistry->deserialize($type, $data);
+    }
+
+    /** @param class-string<Projector>|Projector $projector */
+    public function registerProjector(string $ledgerType, string|Projector $projector): self
+    {
+        if (is_string($projector) && ! is_subclass_of($projector, Projector::class)) {
+            throw new InvalidArgumentException('Entry projectors must implement Projector.');
+        }
+
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $this->addProjector($canonicalType, $projector);
+
+        return $this;
+    }
+
+    /** @param class-string<OperationProjector>|OperationProjector $projector */
+    public function registerOperationProjector(
+        string $ledgerType,
+        string|OperationProjector $projector,
+    ): self {
+        if (is_string($projector) && ! is_subclass_of($projector, OperationProjector::class)) {
+            throw new InvalidArgumentException('Operation projectors must implement OperationProjector.');
+        }
+
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $this->addOperationProjector($canonicalType, $projector);
+
+        return $this;
+    }
+
+    /**
+     * @param  class-string<ReplayableProjector>|ReplayableProjector  $projector
+     */
+    public function rebuildProjection(
+        string|ReplayableProjector $projector,
+        string $ledgerType,
+        int $chunkSize = 1000,
+    ): int {
+        if ($chunkSize <= 0) {
+            throw new InvalidArgumentException('Projection chunk size must be greater than zero.');
+        }
+
+        $resolvedProjector = $this->resolveReplayableProjector($projector);
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $connection = $this->conn();
+
+        return $connection->transaction(function () use (
+            $resolvedProjector,
+            $canonicalType,
+            $connection,
+            $chunkSize,
+        ): int {
+            $resolvedProjector->resetProjection($canonicalType, $connection);
+
+            $processed = 0;
+            $lastSystemDate = null;
+            $lastOperationId = null;
+            $lastOperationPosition = null;
+
+            do {
+                $query = $this->ledgerTranQuery()
+                    ->with('operation')
+                    ->where('ledger_type', $canonicalType);
+
+                if ($lastSystemDate !== null && $lastOperationId !== null && $lastOperationPosition !== null) {
+                    $query->where(function (Builder $cursor) use (
+                        $lastSystemDate,
+                        $lastOperationId,
+                        $lastOperationPosition,
+                    ): void {
+                        $cursor->where('system_date', '>', $lastSystemDate)
+                            ->orWhere(function (Builder $sameDate) use (
+                                $lastSystemDate,
+                                $lastOperationId,
+                                $lastOperationPosition,
+                            ): void {
+                                $sameDate->where('system_date', $lastSystemDate)
+                                    ->where(function (Builder $sameOperation) use (
+                                        $lastOperationId,
+                                        $lastOperationPosition,
+                                    ): void {
+                                        $sameOperation->where('operation_id', '>', $lastOperationId)
+                                            ->orWhere(function (Builder $sameId) use (
+                                                $lastOperationId,
+                                                $lastOperationPosition,
+                                            ): void {
+                                                $sameId->where('operation_id', $lastOperationId)
+                                                    ->where('operation_position', '>', $lastOperationPosition);
+                                            });
+                                    });
+                            });
+                    });
+                }
+
+                /** @var Collection<int, LedgerTransaction> $transactions */
+                $transactions = $query
+                    ->orderBy('system_date')
+                    ->orderBy('operation_id')
+                    ->orderBy('operation_position')
+                    ->limit($chunkSize)
+                    ->get();
+
+                foreach ($transactions as $transaction) {
+                    $resolvedProjector->projectHistorical(
+                        $transaction,
+                        $this->deserializePayload($transaction->payload_type, $transaction->payload),
+                        $transaction->operation,
+                        $connection,
+                    );
+                    $processed++;
+                }
+
+                $last = $transactions->last();
+
+                if ($last !== null) {
+                    $lastSystemDate = $last->system_date;
+                    $lastOperationId = $last->operation_id;
+                    $lastOperationPosition = $last->operation_position;
+                }
+            } while ($transactions->count() === $chunkSize);
+
+            return $processed;
+        });
     }
 
     public function findTransaction(string $transactionId): ?LedgerTransaction
@@ -111,7 +273,7 @@ final class Abacus
         $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
 
         return $this->operationQuery()
-            ->whereHas('transactions', fn(Builder $query) => $query
+            ->whereHas('transactions', fn (Builder $query) => $query
                 ->where('ledger_type', $canonicalType)
                 ->where('ledger_id', $ledgerId))
             ->with('transactions')
@@ -175,7 +337,7 @@ final class Abacus
         ?int $expectedVersion = null,
     ): array {
         $actions = array_map(
-            fn(LedgerPayload $payload): OperationAction => OperationAction::post(
+            fn (LedgerPayload $payload): OperationAction => OperationAction::post(
                 $ledgerType,
                 $ledgerId,
                 $payload,
@@ -206,7 +368,7 @@ final class Abacus
             throw new InvalidArgumentException('An operation callback must be provided.');
         }
 
-        $builder = new OperationBuilder();
+        $builder = new OperationBuilder;
         $callback($builder);
 
         return $this->executeOperation($builder->actions(), $context);
@@ -364,7 +526,7 @@ final class Abacus
         ?string $reversesOperationId = null,
     ): OperationResult {
         if ($actions === []) {
-            throw new EmptyOperationException();
+            throw new EmptyOperationException;
         }
 
         $actions = $this->normalizeActions($actions);
@@ -406,7 +568,8 @@ final class Abacus
 
             [$planned, $before, $after] = $this->planAppends($appends, $heads);
             $this->assertCorrectionPolicies($corrections, $context, $before, $after);
-            $this->persistAppends($operation, $planned, $context, $recordedAt);
+            $transactions = $this->persistAppends($operation, $planned, $context, $recordedAt);
+            $this->runRequiredProjectors($operation, $transactions, $context);
 
             return $this->toOperationResult($operation);
         });
@@ -516,7 +679,7 @@ final class Abacus
             'metadata' => $context->metadata,
             'correlation_id' => $context->correlationId,
             'reverses_operation_id' => $reversesOperationId,
-            'actions' => array_map(fn(OperationAction $action): array => [
+            'actions' => array_map(fn (OperationAction $action): array => [
                 'kind' => $action->kind->value,
                 'ledger_type' => $action->ledgerType,
                 'ledger_id' => $action->ledgerId,
@@ -538,7 +701,7 @@ final class Abacus
         CarbonImmutable $recordedAt,
         ?string $reversesOperationId,
     ): array {
-        $operation = new LedgerOperation();
+        $operation = new LedgerOperation;
         $operation->setConnection($this->connectionOverride);
         $operation->kind = $kind;
         $operation->actor = $context->actor;
@@ -554,7 +717,7 @@ final class Abacus
         $operation->reverses_operation_id = $reversesOperationId;
 
         try {
-            $this->conn()->transaction(fn() => $operation->save());
+            $this->conn()->transaction(fn () => $operation->save());
 
             return [$operation, false];
         } catch (QueryException $exception) {
@@ -632,7 +795,7 @@ final class Abacus
             }
 
             $ledger = $this->resolveLedger($original->ledger_type);
-            $originalPayload = $ledger->deserialize($original->payload_type, $original->payload);
+            $originalPayload = $this->deserializePayload($original->payload_type, $original->payload);
 
             if ($action->kind === OperationKind::Reversal) {
                 $opposing = $ledger->computeOpposing($originalPayload);
@@ -768,7 +931,7 @@ final class Abacus
             $streams[] = [$target->ledger_type, $target->ledger_id];
         }
 
-        usort($streams, fn(array $left, array $right): int => strcmp($left[0], $right[0]) ?: strcmp($left[1], $right[1]));
+        usort($streams, fn (array $left, array $right): int => strcmp($left[0], $right[0]) ?: strcmp($left[1], $right[1]));
 
         return array_values(array_unique($streams, SORT_REGULAR));
     }
@@ -883,6 +1046,7 @@ final class Abacus
             }
 
             try {
+                $this->assertValidMoneyPayload($append->payload);
                 $ledger->assertValidPayload($append->payload);
                 $after[$append->ledgerType][$append->ledgerId] = $ledger->applyToAggregate(
                     $append->payload,
@@ -952,19 +1116,25 @@ final class Abacus
         }
     }
 
-    /** @param list<Append> $appends */
+    /**
+     * @param  list<Append>  $appends
+     * @return Collection<int, LedgerTransaction>
+     */
     private function persistAppends(
         LedgerOperation $operation,
         array $appends,
         PostingContext $context,
         CarbonImmutable $recordedAt,
-    ): void {
+    ): Collection {
         if ($this->conn()->transactionLevel() === 0) {
             throw new LogicException('Ledger operations must run within a database transaction.');
         }
 
+        $transactions = [];
+        $finalHeads = [];
+
         foreach ($appends as $append) {
-            $transaction = new LedgerTransaction();
+            $transaction = new LedgerTransaction;
             $transaction->setConnection($this->connectionOverride);
             $transaction->operation_id = $operation->id;
             $transaction->operation_position = $append->operationPosition;
@@ -979,16 +1149,25 @@ final class Abacus
             $transaction->ledger_id = $append->ledgerId;
             $transaction->event_date = $context->eventDate;
             $transaction->accounting_date = $context->accountingDate;
-            $transaction->payload = $append->payload->jsonSerialize();
+            $transaction->payload = CanonicalJson::normalizeArray($append->payload->jsonSerialize());
             $transaction->reason = $context->reason;
             $transaction->stream_version = $append->version;
             $transaction->save();
 
-            $this->conn()->table('ledger_stream_head')->where([
-                'ledger_type' => $append->ledgerType,
-                'ledger_id' => $append->ledgerId,
-            ])->update(['version' => $append->version]);
+            $transactions[] = $transaction;
+            $finalHeads[$append->ledgerType][$append->ledgerId] = $append->version;
         }
+
+        foreach ($finalHeads as $ledgerType => $streamHeads) {
+            foreach ($streamHeads as $ledgerId => $version) {
+                $this->conn()->table('ledger_stream_head')->where([
+                    'ledger_type' => $ledgerType,
+                    'ledger_id' => $ledgerId,
+                ])->update(['version' => $version]);
+            }
+        }
+
+        return new Collection($transactions);
     }
 
     /** @return array<mixed>|JsonSerializable */
@@ -1013,7 +1192,7 @@ final class Abacus
 
         foreach ($history as $entry) {
             $aggregate = $ledger->applyToAggregate(
-                $ledger->deserialize($entry->payload_type, $entry->payload),
+                $this->deserializePayload($entry->payload_type, $entry->payload),
                 $aggregate,
             );
         }
@@ -1049,5 +1228,107 @@ final class Abacus
     private function conn(): Connection
     {
         return DB::connection($this->connectionOverride);
+    }
+
+    private function assertValidMoneyPayload(LedgerPayload $payload): void
+    {
+        if (! $payload instanceof HasMoneyAmount) {
+            return;
+        }
+
+        $payload->amount();
+
+        if (preg_match('/^[A-Z]{3}$/D', $payload->currency()) !== 1) {
+            throw new InvalidArgumentException('Payload currencies must use three uppercase ASCII letters.');
+        }
+    }
+
+    /** @param class-string<Projector>|Projector $projector */
+    private function addProjector(string $ledgerType, string|Projector $projector): void
+    {
+        $identity = $this->projectorIdentity($projector);
+
+        foreach ($this->projectorRegistry[$ledgerType] ?? [] as $registered) {
+            if ($this->projectorIdentity($registered) === $identity) {
+                return;
+            }
+        }
+
+        $this->projectorRegistry[$ledgerType][] = $projector;
+    }
+
+    /** @param class-string<OperationProjector>|OperationProjector $projector */
+    private function addOperationProjector(string $ledgerType, string|OperationProjector $projector): void
+    {
+        $identity = $this->projectorIdentity($projector);
+
+        foreach ($this->operationProjectorRegistry as $registered) {
+            if ($registered['ledgerType'] === $ledgerType
+                && $this->projectorIdentity($registered['projector']) === $identity) {
+                return;
+            }
+        }
+
+        $this->operationProjectorRegistry[] = [
+            'ledgerType' => $ledgerType,
+            'projector' => $projector,
+        ];
+    }
+
+    /** @param class-string<Projector|OperationProjector>|Projector|OperationProjector $projector */
+    private function projectorIdentity(string|Projector|OperationProjector $projector): string
+    {
+        return is_string($projector) ? $projector : $projector::class;
+    }
+
+    /** @param Collection<int, LedgerTransaction> $transactions */
+    private function runRequiredProjectors(
+        LedgerOperation $operation,
+        Collection $transactions,
+        PostingContext $context,
+    ): void {
+        $connection = $this->conn();
+
+        foreach ($transactions as $transaction) {
+            $payload = $this->deserializePayload($transaction->payload_type, $transaction->payload);
+
+            foreach ($this->projectorRegistry[$transaction->ledger_type] ?? [] as $registered) {
+                $projector = is_string($registered) ? app($registered) : $registered;
+                $projector->project($transaction, $payload, $context, $connection);
+            }
+        }
+
+        $participatingTypes = array_fill_keys($transactions->pluck('ledger_type')->all(), true);
+        $invoked = [];
+
+        foreach ($this->operationProjectorRegistry as $registered) {
+            $identity = $this->projectorIdentity($registered['projector']);
+
+            if (! isset($participatingTypes[$registered['ledgerType']]) || isset($invoked[$identity])) {
+                continue;
+            }
+
+            $projector = is_string($registered['projector'])
+                ? app($registered['projector'])
+                : $registered['projector'];
+            $projector->projectOperation($operation, $transactions, $context, $connection);
+            $invoked[$identity] = true;
+        }
+    }
+
+    /**
+     * @param  class-string<ReplayableProjector>|ReplayableProjector  $projector
+     */
+    private function resolveReplayableProjector(string|ReplayableProjector $projector): ReplayableProjector
+    {
+        if ($projector instanceof ReplayableProjector) {
+            return $projector;
+        }
+
+        if (! is_subclass_of($projector, ReplayableProjector::class)) {
+            throw new InvalidArgumentException('Replayable projectors must implement ReplayableProjector.');
+        }
+
+        return app($projector);
     }
 }

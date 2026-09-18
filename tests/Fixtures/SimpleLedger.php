@@ -86,12 +86,4 @@ final class SimpleLedger implements Ledger
 
         return GenericPayload::make($payload->payloadType(), $newPayload);
     }
-
-    /**
-     * @param  array<mixed>  $payload
-     */
-    public function deserialize(string $eventType, array $payload): LedgerPayload
-    {
-        return GenericPayload::make($eventType, $payload);
-    }
 }

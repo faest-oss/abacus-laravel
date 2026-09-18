@@ -30,6 +30,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property CarbonImmutable $system_date
  * @property CarbonImmutable $accounting_date
  * @property string $actor
+ * @property-read LedgerOperation $operation
  */
 class LedgerTransaction extends Model
 {
@@ -56,6 +57,15 @@ class LedgerTransaction extends Model
             'operation_position' => 'integer',
             'stream_version' => 'integer',
         ];
+    }
+
+    /**
+     * Preserve integral-looking floats in immutable payload JSON.
+     */
+    protected function getJsonCastFlags($key): int
+    {
+        return parent::getJsonCastFlags($key)
+            | ($key === 'payload' ? JSON_PRESERVE_ZERO_FRACTION : 0);
     }
 
     /** @return BelongsTo<LedgerOperation, $this> */

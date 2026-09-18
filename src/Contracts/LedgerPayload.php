@@ -9,4 +9,7 @@ use JsonSerializable;
 interface LedgerPayload extends JsonSerializable
 {
     public function payloadType(): string;
+
+    /** @return array<string, mixed> */
+    public function jsonSerialize(): array;
 }

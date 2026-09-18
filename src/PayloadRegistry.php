@@ -11,40 +11,34 @@ use InvalidArgumentException;
 
 final class PayloadRegistry
 {
-    /** @var array<string, class-string<LedgerPayload>> */
+    /** @var array<string, class-string<DeserializablePayload>> */
     private array $registry = [];
-    /**
-     * Create a new class instance.
-     */
-    public function __construct()
-    {
-        //
-    }
 
+    /** @param class-string<DeserializablePayload> $payloadClass */
     public function register(string $type, string $payloadClass): self
     {
-        if (! is_subclass_of($payloadClass, LedgerPayload::class)) {
-            throw new InvalidArgumentException("Class {$payloadClass} must implement LedgerPayload");
+        if (trim($type) === '' || ! is_subclass_of($payloadClass, DeserializablePayload::class)) {
+            throw new InvalidArgumentException('Payload registration is invalid.');
+        }
+
+        if (isset($this->registry[$type]) && $this->registry[$type] !== $payloadClass) {
+            throw new InvalidArgumentException("Payload type {$type} is already registered.");
         }
 
         $this->registry[$type] = $payloadClass;
+
         return $this;
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     public function deserialize(string $type, array $data): LedgerPayload
     {
-        if (isset($this->registry[$type])) {
-            $class = $this->registry[$type];
+        $class = $this->registry[$type] ?? null;
 
-            if (is_subclass_of($class, DeserializablePayload::class)) {
-                /** @var class-string<DeserializablePayload> $class */
-                return $class::fromPayload($data);
-            }
-        }
-
-        return GenericPayload::make($type, $data);
+        return $class === null
+            ? GenericPayload::make($type, $data)
+            : $class::fromPayload($data);
     }
 }

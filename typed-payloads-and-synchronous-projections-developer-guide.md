@@ -1,9 +1,6 @@
 # Implementation Guide: Typed Payloads and Projections
 
-Status: Draft implementation specification. The payload contracts and registry
-are partially implemented. Required projectors and read-projection rebuilds are
-not implemented. The implementation sequence in this guide begins by
-reconciling the partial payload work with the final contracts below.
+Status: Implemented.
 
 ## 1. Purpose and agreed semantics
 

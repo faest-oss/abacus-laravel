@@ -17,21 +17,7 @@ final class PayloadFingerprint
             $data = $data->jsonSerialize();
         }
 
-        $sort = function (mixed &$item) use (&$sort): void {
-            if (is_array($item)) {
-                if (! array_is_list($item)) {
-                    ksort($item);
-                }
-
-                foreach ($item as &$value) {
-                    $sort($value);
-                }
-            }
-        };
-
-        $sort($data);
-
-        return (string) json_encode($data, JSON_THROW_ON_ERROR);
+        return CanonicalJson::encode($data);
     }
 
     /**

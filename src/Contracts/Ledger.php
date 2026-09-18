@@ -34,11 +34,4 @@ interface Ledger
      * Compute the opposing payload for full reversals.
      */
     public function computeOpposing(LedgerPayload $payload): LedgerPayload;
-
-    /**
-     * Deserialize raw database JSON into a typed payload object.
-     *
-     * @param  array<mixed>  $payload
-     */
-    public function deserialize(string $eventType, array $payload): LedgerPayload;
 }

@@ -102,6 +102,77 @@ their operation ID, operation position, and stream version. See the
 [correction guide](correction-semantics-developer-guide.md) for the complete
 write protocol.
 
+### Typed Payloads
+
+Payloads implement `LedgerPayload` and return an associative array from
+`jsonSerialize()`. Payloads that can be reconstructed from history also
+implement `DeserializablePayload` and may be registered in `config/abacus.php`:
+
+```php
+'payloads' => [
+    HourlyUseRecorded::TYPE => HourlyUseRecorded::class,
+],
+```
+
+Mappings may also be registered during application boot:
+
+```php
+$abacus->registerPayload(HourlyUseRecorded::TYPE, HourlyUseRecorded::class);
+```
+
+Unregistered history is returned as `GenericPayload`. Financial payloads may
+implement `HasMoneyAmount`; Abacus then requires integer minor units through
+the contract and a three-letter uppercase currency code.
+
+### Required Projections
+
+Use a `Projector` for each new transaction or an `OperationProjector` when the
+complete operation is required. Register container-resolvable classes or
+instances against one ledger type:
+
+```php
+$abacus->registerProjector(
+    VehicleEquityLedger::class,
+    HourlyUseSnapshotProjector::class,
+);
+
+$abacus->registerOperationProjector(
+    VehicleEquityLedger::class,
+    CorrectionAggregateProjector::class,
+);
+```
+
+Ledgers may declare the same required projectors through `HasProjectors`.
+Required projectors run on the selected Abacus connection before commit. An
+exception rolls back the operation, its stream heads, and projection writes
+made through the supplied connection.
+
+### Replayable Projections
+
+Disposable reporting models implement `ReplayableProjector` and rebuild only
+when explicitly requested:
+
+```php
+$count = $abacus->rebuildProjection(
+    VehicleMonthlyEquitySummaryProjector::class,
+    VehicleEquityLedger::class,
+    chunkSize: 500,
+);
+```
+
+The equivalent Artisan command is:
+
+```bash
+php artisan abacus:projection:rebuild \
+    "App\Projectors\VehicleMonthlyEquitySummaryProjector" \
+    --ledger="vehicle-equity" \
+    --chunk=500
+```
+
+The reset and complete replay are one transaction. Pause writes for the
+selected ledger during a rebuild; `--force` only suppresses the production
+confirmation and does not coordinate maintenance mode.
+
 ## Changelog
 
 Please see [CHANGELOG](CHANGELOG.md) for more information on what has changed recently.

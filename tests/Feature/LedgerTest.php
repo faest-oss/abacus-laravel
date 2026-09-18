@@ -8,7 +8,6 @@ use Faest\Abacus\Data\PostingContext;
 use Faest\Abacus\Enums\OperationKind;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IdempotencyConflictException;
-use Faest\Abacus\Exceptions\InvalidReversalException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Facades\Abacus;
 use Faest\Abacus\Models\LedgerOperation;
@@ -21,7 +20,7 @@ use function Pest\Laravel\assertDatabaseCount;
 use function Pest\Laravel\assertDatabaseHas;
 
 beforeEach(function () {
-    Abacus::registerLedger(new SimpleLedger());
+    Abacus::registerLedger(new SimpleLedger);
 });
 
 it('records explicit posting context and toolkit time', function () {
@@ -246,7 +245,7 @@ function ledgerContext(): PostingContext
 
 function ledgerUser(): User
 {
-    $user = new User();
+    $user = new User;
     $user->forceFill(['id' => '89']);
 
     return $user;

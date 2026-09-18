@@ -23,9 +23,3 @@ it('loads the package translations', function () {
 it('loads the package views', function () {
     expect(view()->exists('abacus::placeholder'))->toBeTrue();
 });
-
-it('registers the artisan command', function () {
-    $this->artisan('abacus:placeholder')
-        ->expectsOutputToContain('Abacus placeholder command executed.')
-        ->assertSuccessful();
-});

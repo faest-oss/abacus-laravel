@@ -9,7 +9,7 @@ use Faest\Abacus\Contracts\LedgerPayload;
 final class GenericPayload implements LedgerPayload
 {
     /**
-     * @param  array<mixed>  $payload
+     * @param  array<string, mixed>  $payload
      */
     public function __construct(
         private string $payloadType,
@@ -17,7 +17,7 @@ final class GenericPayload implements LedgerPayload
     ) {}
 
     /**
-     * @param  array<mixed>  $payload
+     * @param  array<string, mixed>  $payload
      */
     public static function make(string $payloadType, array $payload): static
     {
@@ -30,14 +30,14 @@ final class GenericPayload implements LedgerPayload
     }
 
     /**
-     * @return array<mixed>
+     * @return array<string, mixed>
      */
     public function payload(): array
     {
         return $this->payload;
     }
 
-    public function jsonSerialize(): mixed
+    public function jsonSerialize(): array
     {
         return $this->payload;
     }
