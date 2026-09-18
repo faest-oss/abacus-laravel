@@ -31,6 +31,13 @@ Install the package with `composer require faest-oss/abacus`. Laravel discovers
 Publish all resources with `php artisan vendor:publish --tag=abacus`, or use an
 individual `abacus-*` tag such as `abacus-config` or `abacus-migrations`.
 
+Before running the migrations, configure `abacus.connection`, `abacus.schema`,
+and the four `abacus.tables.*` values when the ledger store should not use the
+application's default connection, current schema, and table names. The schema
+must already exist, and table values must remain unqualified because the schema
+is configured separately. `Abacus::overrideConnection()` takes precedence for
+one coordinator instance without changing its configured schema or tables.
+
 Register each ledger implementation with `Abacus::registerLedger()`. A ledger
 implements `Faest\Abacus\Contracts\Ledger`, including deterministic payload
 reduction, payload validation, completed-aggregate invariant validation,
@@ -138,3 +145,5 @@ $aggregate = $abacus->getAggregate(
   choose the timeline that answers the domain question
 - do not create snapshots inside ordinary write workflows or treat them as
   authoritative ledger history
+- do not switch Abacus storage configuration until existing ledger data has
+  been moved with an application-owned migration

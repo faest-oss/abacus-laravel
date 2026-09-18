@@ -9,7 +9,6 @@ use Database\Factories\LedgerTransactionFactory;
 use Faest\Abacus\Exceptions\LedgerImmutableException;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
@@ -32,7 +31,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property string $actor
  * @property-read LedgerOperation $operation
  */
-class LedgerTransaction extends Model
+class LedgerTransaction extends AbacusModel
 {
     /** @use HasFactory<LedgerTransactionFactory> */
     use HasFactory;
@@ -43,9 +42,12 @@ class LedgerTransaction extends Model
 
     public const UPDATED_AT = null; // Disable standard updated_at.
 
-    protected $table = 'ledger_transaction';
-
     protected $guarded = ['id', 'system_date', 'actor'];
+
+    protected function storageTable(): string
+    {
+        return 'ledger_transaction';
+    }
 
     protected function casts(): array
     {

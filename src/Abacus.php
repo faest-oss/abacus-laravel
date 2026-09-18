@@ -39,6 +39,7 @@ use Faest\Abacus\Models\LedgerSnapshot;
 use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\Support\CanonicalJson;
 use Faest\Abacus\Support\PayloadFingerprint;
+use Faest\Abacus\Support\StorageConfiguration;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
@@ -71,9 +72,12 @@ final class Abacus
 
     public function __construct(
         private PayloadRegistry $payloadRegistry,
+        ?StorageConfiguration $storage = null,
     ) {
-        //
+        $this->storage = $storage ?? app(StorageConfiguration::class);
     }
+
+    private StorageConfiguration $storage;
 
     public function registerLedger(Ledger $ledger): self
     {
@@ -279,6 +283,7 @@ final class Abacus
     public function operationsForStream(string $ledgerType, string $ledgerId): Builder
     {
         $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $operationTable = $this->storage->table('ledger_operation');
 
         return $this->operationQuery()
             ->whereHas('transactions', fn (Builder $query) => $query
@@ -288,7 +293,7 @@ final class Abacus
             ->orderBy(
                 $this->ledgerTranQuery()
                     ->selectRaw('MAX(stream_version)')
-                    ->whereColumn('operation_id', 'ledger_operation.id')
+                    ->whereColumn('operation_id', "{$operationTable}.id")
                     ->where('ledger_type', $canonicalType)
                     ->where('ledger_id', $ledgerId),
             );
@@ -301,6 +306,7 @@ final class Abacus
         ?TransactionCriteria $criteria = null,
     ): Builder {
         $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $transactionTable = $this->storage->table('ledger_transaction');
         $criteria ??= new TransactionCriteria;
         $query = $this->ledgerTranQuery()
             ->where('ledger_type', $canonicalType)
@@ -329,14 +335,14 @@ final class Abacus
         }
 
         if ($criteria->reversalStatus !== null) {
-            $reversals = $this->conn()->table('ledger_transaction as reversals')
+            $reversals = $this->conn()->table("{$transactionTable} as reversals")
                 ->selectRaw('1')
-                ->whereColumn('reversals.reverses_transaction_id', 'ledger_transaction.id')
+                ->whereColumn('reversals.reverses_transaction_id', "{$transactionTable}.id")
                 ->where('reversals.ledger_type', $canonicalType)
                 ->where('reversals.ledger_id', $ledgerId);
 
             $this->applyTemporalView($reversals, $criteria->view, 'reversals');
-            $query->whereNull('ledger_transaction.reverses_transaction_id');
+            $query->whereNull("{$transactionTable}.reverses_transaction_id");
 
             $criteria->reversalStatus === ReversalStatus::Reversed
                 ? $query->whereExists($reversals)
@@ -403,7 +409,7 @@ final class Abacus
                 $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
             }
 
-            $headQuery = $this->conn()->table('ledger_stream_head')
+            $headQuery = $this->conn()->table($this->storage->table('ledger_stream_head'))
                 ->where('ledger_type', $canonicalType)
                 ->where('ledger_id', $ledgerId);
             $head = $this->lockTimeout === 0
@@ -415,7 +421,7 @@ final class Abacus
             }
 
             $streamVersion = (int) $head->version;
-            $existing = LedgerSnapshot::on($this->connectionOverride)
+            $existing = LedgerSnapshot::on($this->connectionName())
                 ->where('ledger_type', $canonicalType)
                 ->where('ledger_id', $ledgerId)
                 ->where('stream_version', $streamVersion)
@@ -437,7 +443,7 @@ final class Abacus
                 ->firstOrFail();
 
             $snapshot = new LedgerSnapshot;
-            $snapshot->setConnection($this->connectionOverride);
+            $snapshot->setConnection($this->connectionName());
             $snapshot->ledger_type = $canonicalType;
             $snapshot->ledger_id = $ledgerId;
             $snapshot->stream_version = $streamVersion;
@@ -634,7 +640,7 @@ final class Abacus
 
     private function streamHeadVersion(string $canonicalType, string $ledgerId): int
     {
-        $head = $this->conn()->table('ledger_stream_head')->where([
+        $head = $this->conn()->table($this->storage->table('ledger_stream_head'))->where([
             'ledger_type' => $canonicalType,
             'ledger_id' => $ledgerId,
         ])->first();
@@ -655,13 +661,13 @@ final class Abacus
     /** @return Builder<LedgerTransaction> */
     public function ledgerTranQuery(): Builder
     {
-        return LedgerTransaction::on($this->connectionOverride);
+        return LedgerTransaction::on($this->connectionName());
     }
 
     /** @return Builder<LedgerOperation> */
     public function operationQuery(): Builder
     {
-        return LedgerOperation::on($this->connectionOverride);
+        return LedgerOperation::on($this->connectionName());
     }
 
     /**
@@ -850,7 +856,7 @@ final class Abacus
         ?string $reversesOperationId,
     ): array {
         $operation = new LedgerOperation;
-        $operation->setConnection($this->connectionOverride);
+        $operation->setConnection($this->connectionName());
         $operation->kind = $kind;
         $operation->actor = $context->actor;
         $operation->reason = $context->reason;
@@ -1088,7 +1094,7 @@ final class Abacus
     private function prepareStreamHeads(array $streams): void
     {
         foreach ($streams as [$ledgerType, $ledgerId]) {
-            $query = $this->conn()->table('ledger_stream_head')->where([
+            $query = $this->conn()->table($this->storage->table('ledger_stream_head'))->where([
                 'ledger_type' => $ledgerType,
                 'ledger_id' => $ledgerId,
             ]);
@@ -1097,7 +1103,7 @@ final class Abacus
                 continue;
             }
 
-            $this->conn()->table('ledger_stream_head')->insertOrIgnore([
+            $this->conn()->table($this->storage->table('ledger_stream_head'))->insertOrIgnore([
                 'ledger_type' => $ledgerType,
                 'ledger_id' => $ledgerId,
             ]);
@@ -1117,7 +1123,7 @@ final class Abacus
         }
 
         foreach ($streams as [$ledgerType, $ledgerId]) {
-            $query = $this->conn()->table('ledger_stream_head')
+            $query = $this->conn()->table($this->storage->table('ledger_stream_head'))
                 ->where('ledger_type', $ledgerType)
                 ->where('ledger_id', $ledgerId);
             $head = $this->lockTimeout === 0
@@ -1287,7 +1293,7 @@ final class Abacus
 
         foreach ($appends as $append) {
             $transaction = new LedgerTransaction;
-            $transaction->setConnection($this->connectionOverride);
+            $transaction->setConnection($this->connectionName());
             $transaction->operation_id = $operation->id;
             $transaction->operation_position = $append->operationPosition;
             $transaction->actor = $context->actor;
@@ -1312,7 +1318,7 @@ final class Abacus
 
         foreach ($finalHeads as $ledgerType => $streamHeads) {
             foreach ($streamHeads as $ledgerId => $version) {
-                $this->conn()->table('ledger_stream_head')->where([
+                $this->conn()->table($this->storage->table('ledger_stream_head'))->where([
                     'ledger_type' => $ledgerType,
                     'ledger_id' => $ledgerId,
                 ])->update(['version' => $version]);
@@ -1334,7 +1340,7 @@ final class Abacus
         $startingVersion = 0;
 
         if ($ledger instanceof SnapshotsAggregate) {
-            $snapshotQuery = LedgerSnapshot::on($this->connectionOverride)
+            $snapshotQuery = LedgerSnapshot::on($this->connectionName())
                 ->where('ledger_type', $ledger->getLedgerType())
                 ->where('ledger_id', $ledgerId)
                 ->where('snapshot_version', $this->snapshotVersion($ledger))
@@ -1403,8 +1409,10 @@ final class Abacus
     private function applyTemporalView(
         Builder|QueryBuilder $query,
         TemporalView $view,
-        string $table = 'ledger_transaction',
+        ?string $table = null,
     ): void {
+        $table ??= $this->storage->table('ledger_transaction');
+
         if ($view->eventThrough !== null) {
             $query->where("{$table}.event_date", '<=', $view->eventThrough);
         }
@@ -1445,7 +1453,12 @@ final class Abacus
 
     private function conn(): Connection
     {
-        return DB::connection($this->connectionOverride);
+        return DB::connection($this->connectionName());
+    }
+
+    private function connectionName(): ?string
+    {
+        return $this->storage->connection($this->connectionOverride);
     }
 
     private function assertValidMoneyPayload(LedgerPayload $payload): void

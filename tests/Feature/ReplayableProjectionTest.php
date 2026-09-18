@@ -138,7 +138,7 @@ it('validates rebuild command arguments', function (array $arguments, string $me
     ], '--chunk'],
 ]);
 
-it('requires confirmation in production and honors force', function () {
+it('requires confirmation in production', function () {
     $this->app->detectEnvironment(fn (): string => 'production');
     Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());
 
@@ -147,6 +147,11 @@ it('requires confirmation in production and honors force', function () {
         '--ledger' => 'cash-account',
     ])->expectsConfirmation('Are you sure you want to run this command?', 'no')
         ->assertFailed();
+});
+
+it('honors force in production', function () {
+    $this->app->detectEnvironment(fn (): string => 'production');
+    Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());
 
     $this->artisan('abacus:projection:rebuild', [
         'projector' => RecordingReplayableProjector::class,

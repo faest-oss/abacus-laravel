@@ -34,6 +34,35 @@ Or, you may publish each resource individually:
 php artisan vendor:publish --tag="abacus-config"
 ```
 
+Configure Abacus storage before running its migrations. By default, Abacus uses
+Laravel's default database connection and the current database schema:
+
+```php
+// config/abacus.php
+'connection' => env('ABACUS_DB_CONNECTION'),
+'schema' => env('ABACUS_DB_SCHEMA'),
+
+'tables' => [
+    'ledger_stream_head' => 'ledger_stream_head',
+    'ledger_operation' => 'ledger_operation',
+    'ledger_transaction' => 'ledger_transaction',
+    'ledger_snapshot' => 'ledger_snapshot',
+],
+```
+
+Set `ABACUS_DB_CONNECTION` to use a dedicated configured Laravel connection.
+Set `ABACUS_DB_SCHEMA` for a schema such as `accounting`; the schema must
+already exist. Table values are independently configurable, unqualified names.
+For SQLite, `main` may be used as the schema.
+
+`Abacus::overrideConnection()` remains available for an individual coordinator
+instance and takes precedence over `abacus.connection`. It does not change the
+configured schema or table names.
+
+Changing storage names does not rename or move existing data. Applications
+with an existing Abacus installation must migrate their data before switching
+the configuration.
+
 ### Publishing and Running the Migrations
 
 ```bash

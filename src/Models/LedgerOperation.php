@@ -8,7 +8,6 @@ use Carbon\CarbonImmutable;
 use Faest\Abacus\Enums\OperationKind;
 use Faest\Abacus\Exceptions\LedgerImmutableException;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
@@ -26,7 +25,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string $request_fingerprint
  * @property ?string $reverses_operation_id
  */
-class LedgerOperation extends Model
+class LedgerOperation extends AbacusModel
 {
     use HasUlids;
 
@@ -34,9 +33,12 @@ class LedgerOperation extends Model
 
     public const UPDATED_AT = null;
 
-    protected $table = 'ledger_operation';
-
     protected $guarded = ['id', 'system_date'];
+
+    protected function storageTable(): string
+    {
+        return 'ledger_operation';
+    }
 
     protected function casts(): array
     {

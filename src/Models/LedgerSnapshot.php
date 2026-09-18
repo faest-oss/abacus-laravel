@@ -7,7 +7,6 @@ namespace Faest\Abacus\Models;
 use Carbon\CarbonImmutable;
 use Faest\Abacus\Exceptions\LedgerImmutableException;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
-use Illuminate\Database\Eloquent\Model;
 
 /**
  * @property string $id
@@ -22,15 +21,18 @@ use Illuminate\Database\Eloquent\Model;
  * @property CarbonImmutable $max_system_date
  * @property CarbonImmutable $created_at
  */
-class LedgerSnapshot extends Model
+class LedgerSnapshot extends AbacusModel
 {
     use HasUlids;
 
     public const UPDATED_AT = null;
 
-    protected $table = 'ledger_snapshot';
-
     protected $guarded = ['id', 'created_at'];
+
+    protected function storageTable(): string
+    {
+        return 'ledger_snapshot';
+    }
 
     protected function casts(): array
     {

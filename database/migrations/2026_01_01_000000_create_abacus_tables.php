@@ -2,22 +2,43 @@
 
 declare(strict_types=1);
 
+use Faest\Abacus\Support\StorageConfiguration;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
     public function up(): void
     {
-        Schema::create('ledger_stream_head', function (Blueprint $table) {
+        $storage = app(StorageConfiguration::class);
+        $connection = DB::connection($storage->connection());
+        $schema = $connection->getSchemaBuilder();
+        $streamHeadTable = $storage->table('ledger_stream_head');
+        $operationTable = $storage->table('ledger_operation');
+        $transactionTable = $storage->table('ledger_transaction');
+        $snapshotTable = $storage->table('ledger_snapshot');
+        $streamHeadReference = $storage->table(
+            'ledger_stream_head',
+            qualified: $connection->getDriverName() !== 'sqlite',
+        );
+        $operationReference = $storage->table(
+            'ledger_operation',
+            qualified: $connection->getDriverName() !== 'sqlite',
+        );
+        $transactionReference = $storage->table(
+            'ledger_transaction',
+            qualified: $connection->getDriverName() !== 'sqlite',
+        );
+
+        $schema->create($streamHeadTable, function (Blueprint $table) {
             $table->string('ledger_type');
             $table->string('ledger_id');
             $table->bigInteger('version')->default(0);
             $table->primary(['ledger_type', 'ledger_id']);
         });
 
-        Schema::create('ledger_operation', function (Blueprint $table) {
+        $schema->create($operationTable, function (Blueprint $table) use ($operationReference) {
             $table->ulid('id');
             $table->primary('id');
             $table->string('kind');
@@ -28,18 +49,22 @@ return new class extends Migration
             $table->timestamp('system_date');
             $table->uuid('correlation_id')->nullable();
             $table->json('metadata');
-            $table->string('idempotency_key')->nullable()->unique();
+            $table->string('idempotency_key')->nullable()->unique('abacus_operation_idempotency_unique');
             $table->unsignedSmallInteger('request_fingerprint_version');
             $table->string('request_fingerprint', 64);
             $table->ulid('reverses_operation_id')->nullable();
 
-            $table->foreign('reverses_operation_id')
+            $table->foreign('reverses_operation_id', 'abacus_operation_reversal_foreign')
                 ->references('id')
-                ->on('ledger_operation')
+                ->on($operationReference)
                 ->restrictOnDelete();
         });
 
-        Schema::create('ledger_transaction', function (Blueprint $table) {
+        $schema->create($transactionTable, function (Blueprint $table) use (
+            $operationReference,
+            $streamHeadReference,
+            $transactionReference,
+        ) {
             $table->ulid('id');
             $table->primary('id');
             $table->ulid('operation_id');
@@ -61,27 +86,30 @@ return new class extends Migration
 
             $table->unique(['ledger_type', 'ledger_id', 'stream_version']);
             $table->unique(['operation_id', 'operation_position']);
-            $table->unique('reverses_transaction_id');
-            $table->unique('replaces_transaction_id');
-            $table->foreign('operation_id')
+            $table->unique('reverses_transaction_id', 'abacus_transaction_reversal_unique');
+            $table->unique('replaces_transaction_id', 'abacus_transaction_replacement_unique');
+            $table->foreign('operation_id', 'abacus_transaction_operation_foreign')
                 ->references('id')
-                ->on('ledger_operation')
+                ->on($operationReference)
                 ->restrictOnDelete();
-            $table->foreign('reverses_transaction_id')
+            $table->foreign('reverses_transaction_id', 'abacus_transaction_reversal_foreign')
                 ->references('id')
-                ->on('ledger_transaction')
+                ->on($transactionReference)
                 ->restrictOnDelete();
-            $table->foreign('adjusts_transaction_id')
+            $table->foreign('adjusts_transaction_id', 'abacus_transaction_adjustment_foreign')
                 ->references('id')
-                ->on('ledger_transaction')
+                ->on($transactionReference)
                 ->restrictOnDelete();
-            $table->foreign('replaces_transaction_id')
+            $table->foreign('replaces_transaction_id', 'abacus_transaction_replacement_foreign')
                 ->references('id')
-                ->on('ledger_transaction')
+                ->on($transactionReference)
                 ->restrictOnDelete();
-            $table->foreign(['ledger_type', 'ledger_id'])
+            $table->foreign(
+                ['ledger_type', 'ledger_id'],
+                'abacus_transaction_stream_foreign',
+            )
                 ->references(['ledger_type', 'ledger_id'])
-                ->on('ledger_stream_head')
+                ->on($streamHeadReference)
                 ->restrictOnDelete();
 
             $table->index(
@@ -103,7 +131,10 @@ return new class extends Migration
             $table->index('adjusts_transaction_id');
         });
 
-        Schema::create('ledger_snapshot', function (Blueprint $table) {
+        $schema->create($snapshotTable, function (Blueprint $table) use (
+            $operationReference,
+            $streamHeadReference,
+        ) {
             $table->ulid('id');
             $table->primary('id');
             $table->string('ledger_type');
@@ -125,22 +156,30 @@ return new class extends Migration
                 ['ledger_type', 'ledger_id', 'snapshot_version', 'stream_version'],
                 'ledger_snapshot_lookup_index',
             );
-            $table->foreign(['ledger_type', 'ledger_id'])
+            $table->foreign(
+                ['ledger_type', 'ledger_id'],
+                'abacus_snapshot_stream_foreign',
+            )
                 ->references(['ledger_type', 'ledger_id'])
-                ->on('ledger_stream_head')
+                ->on($streamHeadReference)
                 ->restrictOnDelete();
-            $table->foreign('operation_id')
+            $table->foreign('operation_id', 'abacus_snapshot_operation_foreign')
                 ->references('id')
-                ->on('ledger_operation')
+                ->on($operationReference)
                 ->restrictOnDelete();
         });
     }
 
     public function down(): void
     {
-        Schema::dropIfExists('ledger_snapshot');
-        Schema::dropIfExists('ledger_transaction');
-        Schema::dropIfExists('ledger_operation');
-        Schema::dropIfExists('ledger_stream_head');
+        $storage = app(StorageConfiguration::class);
+        $schema = DB::connection($storage->connection())->getSchemaBuilder();
+
+        $schema->withoutForeignKeyConstraints(function () use ($schema, $storage): void {
+            $schema->dropIfExists($storage->table('ledger_snapshot'));
+            $schema->dropIfExists($storage->table('ledger_transaction'));
+            $schema->dropIfExists($storage->table('ledger_operation'));
+            $schema->dropIfExists($storage->table('ledger_stream_head'));
+        });
     }
 };

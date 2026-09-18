@@ -6,6 +6,7 @@ namespace Faest\Abacus;
 
 use Faest\Abacus\Console\Commands\RebuildProjectionCommand;
 use Faest\Abacus\Contracts\DeserializablePayload;
+use Faest\Abacus\Support\StorageConfiguration;
 use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
@@ -18,6 +19,10 @@ class AbacusServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/abacus.php', 'abacus');
+
+        $this->app->singleton(StorageConfiguration::class, function (Application $app) {
+            return new StorageConfiguration($app->make(Repository::class));
+        });
 
         $this->app->singleton(PayloadRegistry::class, function (Application $app) {
             $registry = new PayloadRegistry;
@@ -33,7 +38,10 @@ class AbacusServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(Abacus::class, function (Application $app) {
-            return new Abacus($app->make(PayloadRegistry::class));
+            return new Abacus(
+                $app->make(PayloadRegistry::class),
+                $app->make(StorageConfiguration::class),
+            );
         });
     }
 
