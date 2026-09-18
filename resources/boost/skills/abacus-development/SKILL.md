@@ -74,6 +74,19 @@ php artisan abacus:projection:rebuild \
 
 Production rebuilds require confirmation unless `--force` is supplied.
 
+Use `TemporalView::eventAsOf()`, `accountingAsOf()`, or `knownAt()` with
+`getAggregate()` when a workflow needs state through inclusive domain or
+recorded-time cutoffs. Use `transactionsForStream()` with
+`TransactionCriteria` for stream-local audit queries, including exact
+operation, correlation, correction-relationship, and view-relative reversal
+status filters.
+
+Implement `SnapshotsAggregate` only when a ledger benefits from accelerated
+aggregate replay. Give each incompatible serialized format a new positive
+snapshot version, keep serialization and hydration deterministic, and invoke
+`createAggregateSnapshot()` explicitly from application maintenance code.
+Snapshots are disposable; ordinary Abacus writes do not create them.
+
 ## Rules, References, and Templates
 
 Read before executing:
@@ -97,6 +110,17 @@ $transaction = $abacus->post(
     new RentPosted(amount: 50000),
     $context,
 );
+
+$view = \Faest\Abacus\Data\TemporalView::accountingAsOf(
+    now()->endOfMonth(),
+    knownAt: now(),
+);
+
+$aggregate = $abacus->getAggregate(
+    VehicleEquityLedger::class,
+    (string) $vehicle->id,
+    $view,
+);
 ```
 
 ## Anti-patterns
@@ -110,3 +134,7 @@ $transaction = $abacus->post(
   projectors
 - do not use replayable projections for authoritative workflow records, and do
   not rebuild while writes for the selected ledger continue
+- do not treat event, accounting, and recorded timestamps as interchangeable;
+  choose the timeline that answers the domain question
+- do not create snapshots inside ordinary write workflows or treat them as
+  authoritative ledger history

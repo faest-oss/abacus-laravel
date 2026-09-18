@@ -15,6 +15,7 @@ use Faest\Abacus\Contracts\LedgerPayload;
 use Faest\Abacus\Contracts\OperationProjector;
 use Faest\Abacus\Contracts\Projector;
 use Faest\Abacus\Contracts\ReplayableProjector;
+use Faest\Abacus\Contracts\SnapshotsAggregate;
 use Faest\Abacus\Data\Append;
 use Faest\Abacus\Data\CorrectionContext;
 use Faest\Abacus\Data\LedgerReplacementResult;
@@ -22,20 +23,26 @@ use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\OperationAction;
 use Faest\Abacus\Data\OperationResult;
 use Faest\Abacus\Data\PostingContext;
+use Faest\Abacus\Data\TemporalView;
 use Faest\Abacus\Data\Transaction;
+use Faest\Abacus\Data\TransactionCriteria;
+use Faest\Abacus\Enums\CorrectionRelationship;
 use Faest\Abacus\Enums\OperationKind;
+use Faest\Abacus\Enums\ReversalStatus;
 use Faest\Abacus\Exceptions\EmptyOperationException;
 use Faest\Abacus\Exceptions\FailedInvariantException;
 use Faest\Abacus\Exceptions\IdempotencyConflictException;
 use Faest\Abacus\Exceptions\InvalidCorrectionException;
 use Faest\Abacus\Exceptions\UnexpectedStreamVersionException;
 use Faest\Abacus\Models\LedgerOperation;
+use Faest\Abacus\Models\LedgerSnapshot;
 use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\Support\CanonicalJson;
 use Faest\Abacus\Support\PayloadFingerprint;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -43,6 +50,7 @@ use InvalidArgumentException;
 use JsonSerializable;
 use LogicException;
 use Throwable;
+use UnexpectedValueException;
 
 final class Abacus
 {
@@ -286,10 +294,72 @@ final class Abacus
             );
     }
 
+    /** @return Builder<LedgerTransaction> */
+    public function transactionsForStream(
+        string $ledgerType,
+        string $ledgerId,
+        ?TransactionCriteria $criteria = null,
+    ): Builder {
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+        $criteria ??= new TransactionCriteria;
+        $query = $this->ledgerTranQuery()
+            ->where('ledger_type', $canonicalType)
+            ->where('ledger_id', $ledgerId);
+
+        $this->applyTemporalView($query, $criteria->view);
+
+        if ($criteria->operationId !== null) {
+            $query->where('operation_id', $criteria->operationId);
+        }
+
+        if ($criteria->correlationId !== null) {
+            $query->where('correlation_id', $criteria->correlationId);
+        }
+
+        if ($criteria->correction !== null) {
+            $column = match ($criteria->correction->relationship) {
+                CorrectionRelationship::Reversal => 'reverses_transaction_id',
+                CorrectionRelationship::Replacement => 'replaces_transaction_id',
+                CorrectionRelationship::Adjustment => 'adjusts_transaction_id',
+            };
+
+            $criteria->correction->targetTransactionId === null
+                ? $query->whereNotNull($column)
+                : $query->where($column, $criteria->correction->targetTransactionId);
+        }
+
+        if ($criteria->reversalStatus !== null) {
+            $reversals = $this->conn()->table('ledger_transaction as reversals')
+                ->selectRaw('1')
+                ->whereColumn('reversals.reverses_transaction_id', 'ledger_transaction.id')
+                ->where('reversals.ledger_type', $canonicalType)
+                ->where('reversals.ledger_id', $ledgerId);
+
+            $this->applyTemporalView($reversals, $criteria->view, 'reversals');
+            $query->whereNull('ledger_transaction.reverses_transaction_id');
+
+            $criteria->reversalStatus === ReversalStatus::Reversed
+                ? $query->whereExists($reversals)
+                : $query->whereNotExists($reversals);
+        }
+
+        return $query->orderBy('stream_version');
+    }
+
     /** @return array<mixed>|JsonSerializable */
-    public function getAggregate(string $ledgerType, string $ledgerId): array|JsonSerializable
-    {
-        return $this->rebuildAggregate($ledgerType, $ledgerId);
+    public function getAggregate(
+        string $ledgerType,
+        string $ledgerId,
+        ?TemporalView $view = null,
+    ): array|JsonSerializable {
+        $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+
+        return $this->rebuildAggregate(
+            $canonicalType,
+            $ledgerId,
+            $this->streamHeadVersion($canonicalType, $ledgerId),
+            $view,
+        );
     }
 
     /** @return array<mixed>|JsonSerializable */
@@ -310,6 +380,78 @@ final class Abacus
         }
 
         return $this->rebuildAggregate($canonicalType, $ledgerId, (int) $endingVersion);
+    }
+
+    public function createAggregateSnapshot(string $ledgerType, string $ledgerId): int
+    {
+        $ledger = $this->resolveLedger($ledgerType);
+
+        if (! $ledger instanceof SnapshotsAggregate) {
+            throw new InvalidArgumentException('The selected ledger does not support aggregate snapshots.');
+        }
+
+        $snapshotVersion = $this->snapshotVersion($ledger);
+        $canonicalType = $ledger->getLedgerType();
+
+        return $this->conn()->transaction(function () use (
+            $ledger,
+            $canonicalType,
+            $ledgerId,
+            $snapshotVersion,
+        ): int {
+            if ($this->lockTimeout !== null && $this->lockTimeout > 0) {
+                $this->conn()->statement("SET statement_timeout = {$this->lockTimeout}");
+            }
+
+            $headQuery = $this->conn()->table('ledger_stream_head')
+                ->where('ledger_type', $canonicalType)
+                ->where('ledger_id', $ledgerId);
+            $head = $this->lockTimeout === 0
+                ? $headQuery->lock('for update nowait')->first()
+                : $headQuery->lockForUpdate()->first();
+
+            if ($head === null || (int) $head->version === 0) {
+                return 0;
+            }
+
+            $streamVersion = (int) $head->version;
+            $existing = LedgerSnapshot::on($this->connectionOverride)
+                ->where('ledger_type', $canonicalType)
+                ->where('ledger_id', $ledgerId)
+                ->where('stream_version', $streamVersion)
+                ->where('snapshot_version', $snapshotVersion)
+                ->exists();
+
+            if ($existing) {
+                return $streamVersion;
+            }
+
+            $aggregate = $this->rebuildAggregate($canonicalType, $ledgerId, $streamVersion);
+            $serialized = CanonicalJson::normalizeArray($ledger->serializeAggregateSnapshot($aggregate));
+            $history = $this->ledgerTranQuery()
+                ->where('ledger_type', $canonicalType)
+                ->where('ledger_id', $ledgerId)
+                ->where('stream_version', '<=', $streamVersion);
+            $boundary = (clone $history)
+                ->where('stream_version', $streamVersion)
+                ->firstOrFail();
+
+            $snapshot = new LedgerSnapshot;
+            $snapshot->setConnection($this->connectionOverride);
+            $snapshot->ledger_type = $canonicalType;
+            $snapshot->ledger_id = $ledgerId;
+            $snapshot->stream_version = $streamVersion;
+            $snapshot->operation_id = $boundary->operation_id;
+            $snapshot->snapshot_version = $snapshotVersion;
+            $snapshot->aggregate = $serialized;
+            $snapshot->max_event_date = (clone $history)->max('event_date');
+            $snapshot->max_accounting_date = (clone $history)->max('accounting_date');
+            $snapshot->max_system_date = (clone $history)->max('system_date');
+            $snapshot->created_at = CarbonImmutable::now();
+            $snapshot->save();
+
+            return $streamVersion;
+        });
     }
 
     public function post(
@@ -486,6 +628,12 @@ final class Abacus
     public function streamVersion(string $ledgerType, string $ledgerId): int
     {
         $canonicalType = $this->resolveLedger($ledgerType)->getLedgerType();
+
+        return $this->streamHeadVersion($canonicalType, $ledgerId);
+    }
+
+    private function streamHeadVersion(string $canonicalType, string $ledgerId): int
+    {
         $head = $this->conn()->table('ledger_stream_head')->where([
             'ledger_type' => $canonicalType,
             'ledger_id' => $ledgerId,
@@ -1040,7 +1188,11 @@ final class Abacus
             $ledger = $this->resolveLedger($append->ledgerType);
 
             if (! isset($after[$append->ledgerType][$append->ledgerId])) {
-                $aggregate = $this->rebuildAggregate($append->ledgerType, $append->ledgerId);
+                $aggregate = $this->rebuildAggregate(
+                    $append->ledgerType,
+                    $append->ledgerId,
+                    $heads[$append->ledgerType][$append->ledgerId],
+                );
                 $before[$append->ledgerType][$append->ledgerId] = $aggregate;
                 $after[$append->ledgerType][$append->ledgerId] = $aggregate;
             }
@@ -1174,21 +1326,57 @@ final class Abacus
     private function rebuildAggregate(
         string $ledgerType,
         string $ledgerId,
-        ?int $throughVersion = null,
+        int $throughVersion,
+        ?TemporalView $view = null,
     ): array|JsonSerializable {
         $ledger = $this->resolveLedger($ledgerType);
+        $aggregate = $ledger->initializeAggregate();
+        $startingVersion = 0;
+
+        if ($ledger instanceof SnapshotsAggregate) {
+            $snapshotQuery = LedgerSnapshot::on($this->connectionOverride)
+                ->where('ledger_type', $ledger->getLedgerType())
+                ->where('ledger_id', $ledgerId)
+                ->where('snapshot_version', $this->snapshotVersion($ledger))
+                ->where('stream_version', '<=', $throughVersion);
+
+            if ($view?->eventThrough !== null) {
+                $snapshotQuery->where('max_event_date', '<=', $view->eventThrough);
+            }
+
+            if ($view?->accountingThrough !== null) {
+                $snapshotQuery->where('max_accounting_date', '<=', $view->accountingThrough);
+            }
+
+            if ($view?->recordedThrough !== null) {
+                $snapshotQuery->where('max_system_date', '<=', $view->recordedThrough);
+            }
+
+            $snapshot = $snapshotQuery->orderByDesc('stream_version')->first();
+
+            if ($snapshot !== null) {
+                if (! is_array($snapshot->aggregate)) {
+                    throw new UnexpectedValueException('Stored aggregate snapshot must decode to an array.');
+                }
+
+                $aggregate = $ledger->hydrateAggregateSnapshot($snapshot->aggregate);
+                $startingVersion = $snapshot->stream_version;
+            }
+        }
+
         $query = $this->ledgerTranQuery()
             ->where('ledger_type', $ledger->getLedgerType())
             ->where('ledger_id', $ledgerId)
+            ->where('stream_version', '>', $startingVersion)
+            ->where('stream_version', '<=', $throughVersion)
             ->orderBy('stream_version');
 
-        if ($throughVersion !== null) {
-            $query->where('stream_version', '<=', $throughVersion);
+        if ($view !== null) {
+            $this->applyTemporalView($query, $view);
         }
 
         /** @var Collection<int, LedgerTransaction> $history */
         $history = $query->get();
-        $aggregate = $ledger->initializeAggregate();
 
         foreach ($history as $entry) {
             $aggregate = $ledger->applyToAggregate(
@@ -1198,6 +1386,36 @@ final class Abacus
         }
 
         return $aggregate;
+    }
+
+    private function snapshotVersion(SnapshotsAggregate $ledger): int
+    {
+        $version = $ledger->snapshotVersion();
+
+        if ($version <= 0) {
+            throw new InvalidArgumentException('Aggregate snapshot versions must be greater than zero.');
+        }
+
+        return $version;
+    }
+
+    /** @param Builder<LedgerTransaction>|QueryBuilder $query */
+    private function applyTemporalView(
+        Builder|QueryBuilder $query,
+        TemporalView $view,
+        string $table = 'ledger_transaction',
+    ): void {
+        if ($view->eventThrough !== null) {
+            $query->where("{$table}.event_date", '<=', $view->eventThrough);
+        }
+
+        if ($view->accountingThrough !== null) {
+            $query->where("{$table}.accounting_date", '<=', $view->accountingThrough);
+        }
+
+        if ($view->recordedThrough !== null) {
+            $query->where("{$table}.system_date", '<=', $view->recordedThrough);
+        }
     }
 
     private function toTransaction(LedgerTransaction $transaction): Transaction

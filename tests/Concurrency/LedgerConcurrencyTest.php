@@ -12,6 +12,7 @@ use Faest\Abacus\Models\LedgerTransaction;
 use Faest\Abacus\OperationBuilder;
 use Faest\Abacus\PayloadRegistry;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
+use Faest\Abacus\Tests\Fixtures\SnapshotLedger;
 use Faest\Abacus\Tests\Fixtures\TwoProcessHarness;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -27,6 +28,7 @@ beforeEach(function () {
     }
 
     $this->artisan('migrate:refresh');
+    DB::connection()->table('ledger_snapshot')->delete();
     DB::connection()->table('ledger_transaction')->delete();
     DB::connection()->table('ledger_operation')->delete();
     DB::connection()->table('ledger_stream_head')->delete();
@@ -257,6 +259,43 @@ test('concurrent idempotent posts return one committed operation', function () {
     expect($results[0])->toBe($results[1]);
     assertDatabaseCount('ledger_operation', 1);
     assertDatabaseCount('ledger_transaction', 1);
+});
+
+test('snapshot creation and a competing operation resolve to complete stream boundaries', function () {
+    $abacus = (new Abacus(new PayloadRegistry))->registerLedger(new SnapshotLedger);
+    $abacus->post('snapshot-account', 'one', stdPayload(), stdContext());
+    $context = stdContext();
+
+    $snapshot = static function (): int {
+        return (new Abacus(new PayloadRegistry))
+            ->registerLedger(new SnapshotLedger)
+            ->createAggregateSnapshot('snapshot-account', 'one');
+    };
+    $append = static function () use ($context): array {
+        $transactions = (new Abacus(new PayloadRegistry))
+            ->registerLedger(new SnapshotLedger)
+            ->postMany(
+                'snapshot-account',
+                'one',
+                [
+                    GenericPayload::make('deposit', ['amount' => 2]),
+                    GenericPayload::make('deposit', ['amount' => 2]),
+                ],
+                $context,
+            );
+
+        return array_column($transactions, 'version');
+    };
+
+    [$snapshotVersion, $versions] = TwoProcessHarness::run($snapshot, $append);
+    $stored = DB::connection()->table('ledger_snapshot')->sole();
+    $aggregate = json_decode($stored->aggregate, true, flags: JSON_THROW_ON_ERROR);
+
+    expect($snapshotVersion)->toBeIn([1, 3])
+        ->and($snapshotVersion)->not->toBe(2)
+        ->and($versions)->toBe([2, 3])
+        ->and((int) $stored->stream_version)->toBe($snapshotVersion)
+        ->and($aggregate)->toBe(['total' => $snapshotVersion === 1 ? 2 : 6]);
 });
 
 function stdPayload(): GenericPayload

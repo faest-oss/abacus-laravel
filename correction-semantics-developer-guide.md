@@ -321,10 +321,10 @@ Entry versions identify sequence positions. Intermediate versions inside an
 operation are not supported standalone aggregate or snapshot boundaries.
 Future temporal queries and snapshots must retain this distinction.
 
-Event/accounting-date filtering, cross-stream historical snapshots, and
-snapshot storage remain priority #7 work. This guide establishes their
-operation-boundary requirement without implementing those broader
-capabilities.
+Event/accounting-date filtering and snapshot storage are implemented by the
+[priority #7 temporal query and aggregate guide](temporal-queries-and-aggregates-developer-guide.md).
+This guide establishes their operation-boundary requirement without
+implementing those broader capabilities.
 
 ## 5. Implementation sequence and acceptance
 

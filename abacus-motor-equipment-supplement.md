@@ -244,6 +244,9 @@ committing the hourly-use snapshot that defines what was actually charged.
 
 ### 7. Temporal Queries and Aggregates
 
+The implementation is documented in the
+[temporal queries and aggregates developer guide](temporal-queries-and-aggregates-developer-guide.md).
+
 The proposal's temporal promises should become concrete query APIs. At minimum,
 support querying a stream by:
 
@@ -383,8 +386,9 @@ domains, prioritize:
 4. Idempotency and source identity.
 5. [Exact reversal and replacement semantics](correction-semantics-developer-guide.md).
 6. [Typed payloads and required synchronous projections](typed-payloads-and-synchronous-projections-developer-guide.md).
-7. Temporal query and aggregate APIs.
-8. Period management, snapshots, optional routes, and other conveniences.
+7. [Temporal query and aggregate APIs](temporal-queries-and-aggregates-developer-guide.md).
+8. Period management, snapshot automation and retention, optional routes, and
+   other conveniences.
 
 This ordering builds a trustworthy write protocol before expanding developer
 convenience. Once those capabilities exist, Abacus can replace substantial

@@ -173,6 +173,95 @@ The reset and complete replay are one transaction. Pause writes for the
 selected ledger during a rebuild; `--force` only suppresses the production
 confirmation and does not coordinate maintenance mode.
 
+### Temporal Queries and Aggregates
+
+Use `TemporalView` to reconstruct a stream by event, accounting, or recorded
+time. Cutoffs are inclusive, combine with `AND`, and never change stream-version
+ordering:
+
+```php
+use Carbon\CarbonImmutable;
+use Faest\Abacus\Data\TemporalView;
+
+$view = TemporalView::eventAsOf(
+    eventThrough: CarbonImmutable::parse('2026-06-30 23:59:59'),
+    knownAt: CarbonImmutable::parse('2026-07-05 12:00:00'),
+);
+
+$aggregate = $abacus->getAggregate(
+    VehicleEquityLedger::class,
+    'vehicle-101',
+    $view,
+);
+```
+
+For stream-local audit queries, compose the view with `TransactionCriteria`:
+
+```php
+use Faest\Abacus\Data\TransactionCriteria;
+use Faest\Abacus\Enums\ReversalStatus;
+
+$transactions = $abacus->transactionsForStream(
+    VehicleEquityLedger::class,
+    'vehicle-101',
+    new TransactionCriteria(
+        view: $view,
+        reversalStatus: ReversalStatus::Unreversed,
+    ),
+)->get();
+```
+
+Reversal status is relative to the selected view. A reversal recorded after
+the view's recorded cutoff does not mark its original as reversed in that
+earlier view. Use `CorrectionFilter` and `CorrectionRelationship` to select
+reversal, replacement, or adjustment entries directly.
+
+### Aggregate Snapshots
+
+Ledgers may implement `SnapshotsAggregate` to opt into disposable aggregate
+snapshots. The ledger owns its versioned serialization and hydration format:
+
+```php
+use Faest\Abacus\Contracts\SnapshotsAggregate;
+
+final class VehicleEquityLedger implements Ledger, SnapshotsAggregate
+{
+    public function snapshotVersion(): int
+    {
+        return 1;
+    }
+
+    public function serializeAggregateSnapshot(array|JsonSerializable $aggregate): array
+    {
+        if (! is_array($aggregate)) {
+            throw new LogicException('Unexpected aggregate type.');
+        }
+
+        return $aggregate;
+    }
+
+    public function hydrateAggregateSnapshot(array $snapshot): array|JsonSerializable
+    {
+        return $snapshot;
+    }
+
+    // Ledger methods...
+}
+```
+
+Create snapshots explicitly from application maintenance code:
+
+```php
+$version = $abacus->createAggregateSnapshot(
+    VehicleEquityLedger::class,
+    'vehicle-101',
+);
+```
+
+Creation locks the existing stream head and is idempotent for the ledger's
+current snapshot format and stream version. Empty streams return `0`. Ordinary
+writes never create snapshots, and deleting snapshots only causes full replay.
+
 ## Changelog
 
 Please see [CHANGELOG](CHANGELOG.md) for more information on what has changed recently.

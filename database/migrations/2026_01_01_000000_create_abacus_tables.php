@@ -83,11 +83,62 @@ return new class extends Migration
                 ->references(['ledger_type', 'ledger_id'])
                 ->on('ledger_stream_head')
                 ->restrictOnDelete();
+
+            $table->index(
+                ['ledger_type', 'ledger_id', 'event_date', 'stream_version'],
+                'ledger_transaction_event_stream_index',
+            );
+            $table->index(
+                ['ledger_type', 'ledger_id', 'accounting_date', 'stream_version'],
+                'ledger_transaction_accounting_stream_index',
+            );
+            $table->index(
+                ['ledger_type', 'ledger_id', 'system_date', 'stream_version'],
+                'ledger_transaction_system_stream_index',
+            );
+            $table->index(
+                ['ledger_type', 'ledger_id', 'correlation_id', 'stream_version'],
+                'ledger_transaction_correlation_stream_index',
+            );
+            $table->index('adjusts_transaction_id');
+        });
+
+        Schema::create('ledger_snapshot', function (Blueprint $table) {
+            $table->ulid('id');
+            $table->primary('id');
+            $table->string('ledger_type');
+            $table->string('ledger_id');
+            $table->bigInteger('stream_version');
+            $table->ulid('operation_id');
+            $table->unsignedInteger('snapshot_version');
+            $table->json('aggregate');
+            $table->timestamp('max_event_date');
+            $table->timestamp('max_accounting_date');
+            $table->timestamp('max_system_date');
+            $table->timestamp('created_at');
+
+            $table->unique(
+                ['ledger_type', 'ledger_id', 'stream_version', 'snapshot_version'],
+                'ledger_snapshot_stream_format_unique',
+            );
+            $table->index(
+                ['ledger_type', 'ledger_id', 'snapshot_version', 'stream_version'],
+                'ledger_snapshot_lookup_index',
+            );
+            $table->foreign(['ledger_type', 'ledger_id'])
+                ->references(['ledger_type', 'ledger_id'])
+                ->on('ledger_stream_head')
+                ->restrictOnDelete();
+            $table->foreign('operation_id')
+                ->references('id')
+                ->on('ledger_operation')
+                ->restrictOnDelete();
         });
     }
 
     public function down(): void
     {
+        Schema::dropIfExists('ledger_snapshot');
         Schema::dropIfExists('ledger_transaction');
         Schema::dropIfExists('ledger_operation');
         Schema::dropIfExists('ledger_stream_head');
