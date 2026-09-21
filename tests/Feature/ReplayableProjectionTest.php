@@ -139,25 +139,39 @@ it('validates rebuild command arguments', function (array $arguments, string $me
 ]);
 
 it('requires confirmation in production', function () {
+    $environment = $this->app->environment();
     $this->app->detectEnvironment(fn (): string => 'production');
-    Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());
 
-    $this->artisan('abacus:projection:rebuild', [
-        'projector' => RecordingReplayableProjector::class,
-        '--ledger' => 'cash-account',
-    ])->expectsConfirmation('Are you sure you want to run this command?', 'no')
-        ->assertFailed();
+    try {
+        Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());
+
+        $this->artisan('abacus:projection:rebuild', [
+            'projector' => RecordingReplayableProjector::class,
+            '--ledger' => 'cash-account',
+        ])->expectsConfirmation('Are you sure you want to run this command?', 'no')
+            ->assertFailed();
+    } finally {
+        // Testbench may roll back migrations during teardown and must not prompt.
+        $this->app->instance('env', $environment);
+    }
 });
 
 it('honors force in production', function () {
+    $environment = $this->app->environment();
     $this->app->detectEnvironment(fn (): string => 'production');
-    Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());
 
-    $this->artisan('abacus:projection:rebuild', [
-        'projector' => RecordingReplayableProjector::class,
-        '--ledger' => 'cash-account',
-        '--force' => true,
-    ])->assertSuccessful();
+    try {
+        Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());
+
+        $this->artisan('abacus:projection:rebuild', [
+            'projector' => RecordingReplayableProjector::class,
+            '--ledger' => 'cash-account',
+            '--force' => true,
+        ])->assertSuccessful();
+    } finally {
+        // Testbench may roll back migrations during teardown and must not prompt.
+        $this->app->instance('env', $environment);
+    }
 });
 
 it('propagates the original projection error from the rebuild command', function () {
