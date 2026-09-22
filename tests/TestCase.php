@@ -5,13 +5,14 @@ declare(strict_types=1);
 namespace Faest\Abacus\Tests;
 
 use Faest\Abacus\AbacusServiceProvider;
+use Faest\Abacus\Tests\Support\Db2iServiceProvider;
 use Orchestra\Testbench\TestCase as Orchestra;
 
 abstract class TestCase extends Orchestra
 {
     protected function defineEnvironment($app): void
     {
-        $app['config']->set('database.default', env('DB_CONN', 'sqlite'));
+        $app['config']->set('database.default', env('DB_CONN', env('DB_CONNECTION', 'sqlite')));
         $app['config']->set('database.connections.sqlite.database', ':memory:');
 
         $app['config']->set('database.connections.pgsql', [
@@ -35,13 +36,21 @@ abstract class TestCase extends Orchestra
 
     protected function defineDatabaseMigrations(): void
     {
+        if (config('database.default') === 'db2') {
+            return;
+        }
+
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
     }
 
     protected function getPackageProviders($app): array
     {
-        return [
-            AbacusServiceProvider::class,
-        ];
+        $providers = [AbacusServiceProvider::class];
+
+        if (env('DB_CONN', env('DB_CONNECTION')) === 'db2') {
+            $providers[] = Db2iServiceProvider::class;
+        }
+
+        return $providers;
     }
 }

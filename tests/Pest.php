@@ -2,8 +2,8 @@
 
 declare(strict_types=1);
 
+use Faest\Abacus\Tests\Support\RefreshDatabase;
 use Faest\Abacus\Tests\TestCase;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(TestCase::class)->in(__DIR__);
 

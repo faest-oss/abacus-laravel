@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="../../.db2i/vendor/phpunit/phpunit/phpunit.xsd"
+    backupGlobals="false"
+    bootstrap="../../.db2i/vendor/autoload.php"
+    colors="true"
+    processIsolation="false"
+    stopOnFailure="false"
+    executionOrder="random"
+    failOnWarning="true"
+    failOnRisky="true"
+    failOnEmptyTestSuite="true"
+    beStrictAboutOutputDuringTests="true"
+    cacheDirectory="../../.phpunit.cache/db2i"
+    backupStaticProperties="false"
+>
+    <php>
+        <env name="APP_KEY" value="0123456789abcdef0123456789abcdef"/>
+    </php>
+    <testsuites>
+        <testsuite name="Arch">
+            <file>../ArchTest.php</file>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>../Feature</directory>
+        </testsuite>
+        <testsuite name="Concurrency">
+            <directory>../Concurrency</directory>
+        </testsuite>
+        <testsuite name="Unit">
+            <directory>../Unit</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory suffix=".php">../../src</directory>
+        </include>
+    </source>
+</phpunit>

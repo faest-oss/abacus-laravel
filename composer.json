@@ -85,6 +85,10 @@
             "@docker:up",
             "DB_CONN=pgsql vendor/bin/pest"
         ],
+        "test:db2i": [
+            "Composer\\Config::disableProcessTimeout",
+            "@php tests/Db2i/run.php"
+        ],
         "test": [
             "@analyse",
             "@lint:check",

@@ -14,6 +14,7 @@ use Faest\Abacus\PayloadRegistry;
 use Faest\Abacus\Tests\Fixtures\SimpleLedger;
 use Faest\Abacus\Tests\Fixtures\SnapshotLedger;
 use Faest\Abacus\Tests\Fixtures\TwoProcessHarness;
+use Faest\Abacus\Tests\Support\Db2iDatabase;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -27,7 +28,11 @@ beforeEach(function () {
         return $this->markTestSkipped('Concurrency suite cannot run on sqlite');
     }
 
-    $this->artisan('migrate:refresh');
+    if (config('database.default') === 'db2') {
+        Db2iDatabase::reset();
+    } else {
+        $this->artisan('migrate:refresh');
+    }
     DB::connection()->table('ledger_snapshot')->delete();
     DB::connection()->table('ledger_transaction')->delete();
     DB::connection()->table('ledger_operation')->delete();
@@ -35,6 +40,10 @@ beforeEach(function () {
 });
 
 test('posts acquire an exclusive stream head lock', function () {
+    if (config('database.default') !== 'pgsql') {
+        $this->markTestSkipped('PostgreSQL-specific lock timeout assertion');
+    }
+
     DB::connection('pgsql')->table('ledger_stream_head')->insert([
         'ledger_type' => 'cash-account',
         'ledger_id' => '234',
@@ -124,7 +133,10 @@ test('opposing operations acquire stream locks in the same order', function () {
             $lockOrder = [];
 
             DB::listen(static function ($query) use (&$lockOrder) {
-                if (str_contains(strtolower($query->sql), 'for update')) {
+                $sql = strtolower($query->sql);
+
+                if (str_contains($sql, 'for update')
+                    || str_contains($sql, 'use and keep exclusive locks')) {
                     $lockOrder[] = (string) end($query->bindings);
                 }
             });

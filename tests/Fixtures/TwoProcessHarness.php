@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Faest\Abacus\Tests\Fixtures;
 
+use BWICompanies\DB2Driver\DB2ServiceProvider;
 use Closure;
 use Orchestra\Testbench\Foundation\Process\ProcessDecorator;
+use Orchestra\Testbench\Foundation\Process\RemoteCommand;
+use Orchestra\Testbench\TestCase;
+use ReflectionClass;
 use RuntimeException;
-
-use function Orchestra\Testbench\remote;
 
 final class TwoProcessHarness
 {
@@ -21,8 +23,8 @@ final class TwoProcessHarness
     {
         $environment = self::databaseEnvironment();
         $processes = [
-            remote(self::withoutTestScope($first), $environment),
-            remote(self::withoutTestScope($second), $environment),
+            self::remote(self::withDatabaseConfiguration(self::withoutTestScope($first)), $environment),
+            self::remote(self::withDatabaseConfiguration(self::withoutTestScope($second)), $environment),
         ];
 
         try {
@@ -52,6 +54,44 @@ final class TwoProcessHarness
     {
         return Closure::bind($task, null, null)
             ?? throw new RuntimeException('Unable to remove the Pest test scope from concurrent task');
+    }
+
+    /**
+     * @param  array<string, string>  $environment
+     */
+    private static function remote(Closure $task, array $environment): ProcessDecorator
+    {
+        $packagePath = dirname(__DIR__, 2);
+        $testbenchFile = (new ReflectionClass(TestCase::class))->getFileName();
+
+        if ($testbenchFile === false) {
+            throw new RuntimeException('Unable to locate the Testbench installation');
+        }
+
+        $testbench = dirname($testbenchFile, 4).'/bin/testbench';
+        $environment['TESTBENCH_WORKING_PATH'] = $packagePath;
+
+        return (new RemoteCommand($packagePath, $environment))->handle($testbench, $task);
+    }
+
+    private static function withDatabaseConfiguration(Closure $task): Closure
+    {
+        $connectionName = (string) config('database.default');
+        /** @var array<string, mixed> $connection */
+        $connection = config("database.connections.{$connectionName}");
+        $harnessAutoload = dirname(__DIR__, 2).'/.db2i/vendor/autoload.php';
+
+        return static function () use ($connection, $connectionName, $harnessAutoload, $task): mixed {
+            if ($connection['driver'] === 'db2') {
+                require_once $harnessAutoload;
+                app()->register(DB2ServiceProvider::class);
+            }
+
+            config()->set('database.default', $connectionName);
+            config()->set("database.connections.{$connectionName}", $connection);
+
+            return $task();
+        };
     }
 
     /**

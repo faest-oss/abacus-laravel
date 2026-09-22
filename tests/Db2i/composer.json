@@ -1,0 +1,49 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "faest-oss/abacus-db2i-test-harness",
+    "description": "Local-only DB2 for i acceptance harness for Abacus",
+    "type": "project",
+    "license": "proprietary",
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../..",
+            "options": {
+                "symlink": true
+            }
+        },
+        {
+            "type": "path",
+            "url": "../../../db2-driver",
+            "options": {
+                "symlink": true
+            }
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "bwicompanies/db2-driver": "dev-laravel-13",
+        "faest-oss/abacus": "dev-master",
+        "laravel/framework": "^13.0",
+        "orchestra/testbench": "^11.0",
+        "pestphp/pest": "^4.6",
+        "pestphp/pest-plugin-laravel": "^4.1"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Faest\\Abacus\\Tests\\": "../",
+            "Workbench\\App\\": "../../workbench/app/",
+            "Workbench\\Database\\Factories\\": "../../workbench/database/factories/",
+            "Workbench\\Database\\Seeders\\": "../../workbench/database/seeders/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        },
+        "vendor-dir": "../../.db2i/vendor",
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

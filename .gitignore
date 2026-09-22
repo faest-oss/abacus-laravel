@@ -2,6 +2,8 @@
 /build
 /.phpunit.cache
 /.phpunit.result.cache
+/.env.db2i
+/.db2i
 /coverage
 composer.lock
 .phpunit.cache
