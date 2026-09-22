@@ -84,6 +84,28 @@ final class OperationBuilder
         return $this;
     }
 
+    public function transferBetween(
+        string $sourceLedgerType,
+        string $sourceLedgerId,
+        string $destinationLedgerType,
+        string $destinationLedgerId,
+        LedgerPayload $payload,
+        ?int $expectedSourceVersion = null,
+        ?int $expectedDestinationVersion = null,
+    ): self {
+        $this->actions[] = OperationAction::transferBetween(
+            $sourceLedgerType,
+            $sourceLedgerId,
+            $destinationLedgerType,
+            $destinationLedgerId,
+            $payload,
+            $expectedSourceVersion,
+            $expectedDestinationVersion,
+        );
+
+        return $this;
+    }
+
     /** @return list<OperationAction> */
     public function actions(): array
     {

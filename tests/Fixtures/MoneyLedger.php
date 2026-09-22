@@ -4,49 +4,37 @@ declare(strict_types=1);
 
 namespace Faest\Abacus\Tests\Fixtures;
 
-use Faest\Abacus\Contracts\Ledger;
+use Faest\Abacus\Contracts\HasPayloadTypes;
 use Faest\Abacus\Contracts\LedgerPayload;
-use InvalidArgumentException;
-use JsonSerializable;
+use Faest\Abacus\Data\OperationValidationContext;
+use Faest\Abacus\Ledgers\MoneyBalanceLedger;
 
-final class MoneyLedger implements Ledger
+class MoneyLedger extends MoneyBalanceLedger implements HasPayloadTypes
 {
+    public function __construct(private readonly bool $allowNegative = true) {}
+
     public function getLedgerType(): string
     {
         return 'money-account';
     }
 
-    /** @return array{total: int} */
-    public function initializeAggregate(): array
+    public function payloadTypes(): array
     {
-        return ['total' => 0];
+        return ['test:money' => MoneyPayload::class];
     }
 
-    /** @param array{total: int}|JsonSerializable $existingAggregate */
-    public function applyToAggregate(LedgerPayload $payload, array|JsonSerializable $existingAggregate): array
+    protected function acceptsMoneyPayload(LedgerPayload $payload): bool
     {
-        if (! $payload instanceof MoneyPayload || ! is_array($existingAggregate)) {
-            throw new InvalidArgumentException('Unsupported payload.');
-        }
-
-        return ['total' => $existingAggregate['total'] + $payload->amount()];
+        return $payload instanceof MoneyPayload;
     }
 
-    public function assertValidPayload(LedgerPayload $payload): void
+    protected function currency(): string
     {
-        if (! $payload instanceof MoneyPayload) {
-            throw new InvalidArgumentException('Unsupported payload.');
-        }
+        return 'USD';
     }
 
-    public function assertAggregateInvariants(array|JsonSerializable $aggregate): void {}
-
-    public function computeOpposing(LedgerPayload $payload): LedgerPayload
+    protected function allowsNegativeBalance(?OperationValidationContext $context = null): bool
     {
-        if (! $payload instanceof MoneyPayload) {
-            throw new InvalidArgumentException('Unsupported payload.');
-        }
-
-        return new MoneyPayload(-$payload->amount(), $payload->currency());
+        return $this->allowNegative;
     }
 }

@@ -9,19 +9,23 @@ use Closure;
 use Faest\Abacus\Contracts\CorrectionPolicy;
 use Faest\Abacus\Contracts\DeserializablePayload;
 use Faest\Abacus\Contracts\HasMoneyAmount;
+use Faest\Abacus\Contracts\HasPayloadTypes;
 use Faest\Abacus\Contracts\HasProjectors;
 use Faest\Abacus\Contracts\Ledger;
 use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Contracts\OperationPolicy;
 use Faest\Abacus\Contracts\OperationProjector;
 use Faest\Abacus\Contracts\Projector;
 use Faest\Abacus\Contracts\ReplayableProjector;
 use Faest\Abacus\Contracts\SnapshotsAggregate;
+use Faest\Abacus\Data\AccountingEntry;
 use Faest\Abacus\Data\Append;
 use Faest\Abacus\Data\CorrectionContext;
 use Faest\Abacus\Data\LedgerReplacementResult;
 use Faest\Abacus\Data\LedgerTransferResult;
 use Faest\Abacus\Data\OperationAction;
 use Faest\Abacus\Data\OperationResult;
+use Faest\Abacus\Data\OperationValidationContext;
 use Faest\Abacus\Data\PostingContext;
 use Faest\Abacus\Data\TemporalView;
 use Faest\Abacus\Data\Transaction;
@@ -55,7 +59,7 @@ use UnexpectedValueException;
 
 final class Abacus
 {
-    private const int FINGERPRINT_VERSION = 1;
+    private const int FINGERPRINT_VERSION = 2;
 
     /** @var array<string, Ledger> */
     private array $ledgerRegistry = [];
@@ -83,6 +87,12 @@ final class Abacus
     {
         $this->ledgerRegistry[$ledger->getLedgerType()] = $ledger;
         $this->ledgerRegistry[$ledger::class] = $ledger;
+
+        if ($ledger instanceof HasPayloadTypes) {
+            foreach ($ledger->payloadTypes() as $type => $payloadClass) {
+                $this->registerPayload($type, $payloadClass);
+            }
+        }
 
         if ($ledger instanceof HasProjectors) {
             foreach ($ledger->projectors() as $projector) {
@@ -610,10 +620,33 @@ final class Abacus
         ?int $expectedSourceVersion = null,
         ?int $expectedDestinationVersion = null,
     ): LedgerTransferResult {
+        return $this->transferBetween(
+            $payload,
+            $ledgerType,
+            $sourceLedgerId,
+            $ledgerType,
+            $destinationLedgerId,
+            $context,
+            $expectedSourceVersion,
+            $expectedDestinationVersion,
+        );
+    }
+
+    public function transferBetween(
+        LedgerPayload $payload,
+        string $sourceLedgerType,
+        string $sourceLedgerId,
+        string $destinationLedgerType,
+        string $destinationLedgerId,
+        ?PostingContext $context = null,
+        ?int $expectedSourceVersion = null,
+        ?int $expectedDestinationVersion = null,
+    ): LedgerTransferResult {
         $result = $this->executeOperation(
-            [OperationAction::transfer(
-                $ledgerType,
+            [OperationAction::transferBetween(
+                $sourceLedgerType,
                 $sourceLedgerId,
+                $destinationLedgerType,
                 $destinationLedgerId,
                 $payload,
                 $expectedSourceVersion,
@@ -722,6 +755,8 @@ final class Abacus
 
             [$planned, $before, $after] = $this->planAppends($appends, $heads);
             $this->assertCorrectionPolicies($corrections, $context, $before, $after);
+            $this->assertOperationPolicies($kind, $planned, $heads, $context, $before, $after);
+            $this->assertAggregateInvariants($after);
             $transactions = $this->persistAppends($operation, $planned, $context, $recordedAt);
             $this->runRequiredProjectors($operation, $transactions, $context);
 
@@ -752,13 +787,20 @@ final class Abacus
                 $ledgerType = $this->resolveLedger($action->ledgerType)->getLedgerType();
 
                 if ($action->kind === OperationKind::Transfer) {
-                    if ($action->destinationLedgerId === null || $action->destinationLedgerId === $action->ledgerId) {
+                    if ($action->destinationLedgerType === null || $action->destinationLedgerId === null) {
+                        throw new InvalidArgumentException('A transfer requires a destination ledger stream.');
+                    }
+
+                    $destinationLedgerType = $this->resolveLedger($action->destinationLedgerType)->getLedgerType();
+
+                    if ($destinationLedgerType === $ledgerType && $action->destinationLedgerId === $action->ledgerId) {
                         throw new InvalidArgumentException('A transfer requires two different ledger streams.');
                     }
 
-                    $normalized[] = OperationAction::transfer(
+                    $normalized[] = OperationAction::transferBetween(
                         $ledgerType,
                         $action->ledgerId,
+                        $destinationLedgerType,
                         $action->destinationLedgerId,
                         $action->payload,
                         $action->expectedVersion,
@@ -840,6 +882,7 @@ final class Abacus
                 'payload_type' => $action->payload?->payloadType(),
                 'payload' => $action->payload?->jsonSerialize(),
                 'target_transaction_id' => $action->targetTransactionId,
+                'destination_ledger_type' => $action->destinationLedgerType,
                 'destination_ledger_id' => $action->destinationLedgerId,
             ], $actions),
         ];
@@ -927,7 +970,7 @@ final class Abacus
                     $action->expectedVersion,
                 );
                 $appends[] = new Append(
-                    $ledger->getLedgerType(),
+                    (string) $action->destinationLedgerType,
                     (string) $action->destinationLedgerId,
                     $ledger->computeOpposing($payload),
                     $action->expectedDestinationVersion,
@@ -1065,7 +1108,7 @@ final class Abacus
 
             if ($action->kind === OperationKind::Transfer) {
                 $streams[] = [(string) $action->ledgerType, (string) $action->ledgerId];
-                $streams[] = [(string) $action->ledgerType, (string) $action->destinationLedgerId];
+                $streams[] = [(string) $action->destinationLedgerType, (string) $action->destinationLedgerId];
 
                 continue;
             }
@@ -1224,7 +1267,107 @@ final class Abacus
             $planned[] = $append->planned($nextVersion, $position + 1);
         }
 
+        return [$planned, $before, $after];
+    }
+
+    /**
+     * @param  list<Append>  $planned
+     * @param  array<string, array<string, int>>  $heads
+     * @param  array<string, array<string, array<mixed>|JsonSerializable>>  $before
+     * @param  array<string, array<string, array<mixed>|JsonSerializable>>  $after
+     */
+    private function assertOperationPolicies(
+        OperationKind $kind,
+        array $planned,
+        array $heads,
+        PostingContext $context,
+        array $before,
+        array $after,
+    ): void {
         foreach ($after as $ledgerType => $streamAggregates) {
+            $ledger = $this->resolveLedger($ledgerType);
+
+            if (! $ledger instanceof OperationPolicy) {
+                continue;
+            }
+
+            foreach ($streamAggregates as $ledgerId => $aggregateAfter) {
+                $streamId = (string) $ledgerId;
+                $streamAppends = array_values(array_filter(
+                    $planned,
+                    fn (Append $append): bool => $append->ledgerType === $ledgerType
+                        && $append->ledgerId === $streamId,
+                ));
+                $ledger->assertOperationAllowed(new OperationValidationContext(
+                    kind: $kind,
+                    ledgerType: $ledgerType,
+                    ledgerId: $streamId,
+                    streamVersionBefore: $heads[$ledgerType][$ledgerId],
+                    proposedPayloads: array_map(
+                        fn (Append $append): LedgerPayload => $append->payload,
+                        $streamAppends,
+                    ),
+                    postingContext: $context,
+                    aggregateBefore: $before[$ledgerType][$ledgerId],
+                    aggregateAfter: $aggregateAfter,
+                    accountingEntries: $this->accountingEntries(
+                        $ledgerType,
+                        $streamId,
+                        $heads[$ledgerType][$ledgerId],
+                        $streamAppends,
+                        $context,
+                    ),
+                ));
+            }
+        }
+    }
+
+    /**
+     * @param  list<Append>  $planned
+     * @return list<AccountingEntry>
+     */
+    private function accountingEntries(
+        string $ledgerType,
+        string $ledgerId,
+        int $throughVersion,
+        array $planned,
+        PostingContext $context,
+    ): array {
+        $entries = $this->ledgerTranQuery()
+            ->where('ledger_type', $ledgerType)
+            ->where('ledger_id', $ledgerId)
+            ->where('stream_version', '<=', $throughVersion)
+            ->get()
+            ->map(fn (LedgerTransaction $transaction): AccountingEntry => new AccountingEntry(
+                accountingDate: $transaction->accounting_date,
+                payload: $this->deserializePayload($transaction->payload_type, $transaction->payload),
+                streamVersion: $transaction->stream_version,
+                proposed: false,
+            ))
+            ->all();
+
+        foreach ($planned as $append) {
+            $entries[] = new AccountingEntry(
+                accountingDate: $context->accountingDate,
+                payload: $append->payload,
+                streamVersion: $append->version ?? throw new LogicException('A planned append must have a stream version.'),
+                proposed: true,
+            );
+        }
+
+        usort($entries, function (AccountingEntry $left, AccountingEntry $right): int {
+            $dateOrder = $left->accountingDate <=> $right->accountingDate;
+
+            return $dateOrder !== 0 ? $dateOrder : $left->streamVersion <=> $right->streamVersion;
+        });
+
+        return $entries;
+    }
+
+    /** @param array<string, array<string, array<mixed>|JsonSerializable>> $aggregates */
+    private function assertAggregateInvariants(array $aggregates): void
+    {
+        foreach ($aggregates as $ledgerType => $streamAggregates) {
             $ledger = $this->resolveLedger($ledgerType);
 
             foreach ($streamAggregates as $ledgerId => $aggregate) {
@@ -1240,8 +1383,6 @@ final class Abacus
                 }
             }
         }
-
-        return [$planned, $before, $after];
     }
 
     /**

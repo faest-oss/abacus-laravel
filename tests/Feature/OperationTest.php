@@ -40,6 +40,15 @@ it('posts one entry as an immutable posting operation', function () {
         ->and($operation->transactions)->toHaveCount(1);
 });
 
+it('builds immutable posting metadata fluently', function () {
+    $context = operationContext()
+        ->withMetadata(['source' => 'first', 'retained' => true])
+        ->mergeMetadata(['source' => 'second']);
+
+    expect($context->metadata)->toBe(['source' => 'second', 'retained' => true])
+        ->and(operationContext()->metadata)->toBe([]);
+});
+
 it('posts many ordinary entries to one stream in one operation', function () {
     $transactions = Abacus::postMany(
         'cash-account',

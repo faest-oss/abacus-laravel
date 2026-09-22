@@ -12,6 +12,8 @@ use JsonSerializable;
 
 final class SimpleLedger implements Ledger
 {
+    public function __construct(private readonly string $ledgerType = 'cash-account') {}
+
     /**
      * @return array{total: int}
      */
@@ -58,7 +60,7 @@ final class SimpleLedger implements Ledger
 
     public function getLedgerType(): string
     {
-        return 'cash-account';
+        return $this->ledgerType;
     }
 
     /**

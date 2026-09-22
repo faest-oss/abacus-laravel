@@ -60,7 +60,9 @@ $result = Abacus::operation($context, function (OperationBuilder $operation) use
 ```
 
 `OperationBuilder` supports `post`, `postMany`, `reverse`, `replace`, `adjust`,
-and `transfer`. Builder methods stage intent only. The coordinator resolves
+`transfer`, and `transferBetween`. The latter names source and destination
+ledger types separately while preserving the same atomic transfer semantics.
+Builder methods stage intent only. The coordinator resolves
 correction targets, computes opposing payloads, and assigns relationships under
 the operation's write protocol.
 
@@ -74,10 +76,12 @@ Abacus guarantees that an operation:
 2. Locks every affected `(ledger_type, ledger_id)` stream in canonical order.
 3. Checks optimistic versions against each stream at operation start.
 4. Applies every proposed entry to in-memory aggregates before persistence.
-5. Validates each affected stream's completed aggregate.
-6. Commits all operation records, entries, relationships, and head versions
+5. Runs each affected ledger's operation policy against the locked stream and
+   its existing plus proposed accounting history.
+6. Validates each affected stream's completed aggregate.
+7. Commits all operation records, entries, relationships, and head versions
    together, or rolls them all back.
-7. Assigns one toolkit-owned recorded time and posting context to every entry.
+8. Assigns one toolkit-owned recorded time and posting context to every entry.
 
 Each entry advances its own stream version. `operation_position` records order
 across the complete operation, while `stream_version` records order within one
@@ -117,6 +121,7 @@ normalize actions and canonical ledger types
     -> check starting versions
     -> rebuild each aggregate once
     -> validate and apply all entries in memory
+    -> run locked operation policies
     -> validate completed stream aggregates
     -> persist operation, entries, and final head versions
 ```

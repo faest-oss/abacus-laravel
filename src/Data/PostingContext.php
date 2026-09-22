@@ -131,6 +131,26 @@ final readonly class PostingContext
         );
     }
 
+    /** @param array<mixed> $metadata */
+    public function withMetadata(array $metadata): self
+    {
+        return new self(
+            actor: $this->actor,
+            eventDate: $this->eventDate,
+            accountingDate: $this->accountingDate,
+            reason: $this->reason,
+            correlationId: $this->correlationId,
+            idempotencyKey: $this->idempotencyKey,
+            metadata: $metadata,
+        );
+    }
+
+    /** @param array<mixed> $metadata */
+    public function mergeMetadata(array $metadata): self
+    {
+        return $this->withMetadata(array_replace($this->metadata, $metadata));
+    }
+
     public function withEventDate(CarbonInterface $eventDate): self
     {
         return new self(

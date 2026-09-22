@@ -47,6 +47,7 @@ use JsonSerializable;
  * @method static Transaction adjust(string $transactionId, LedgerPayload $delta, ?PostingContext $context = null, ?int $expectedVersion = null)
  * @method static array<int, Transaction> reverseOperation(string $operationId, ?PostingContext $context = null)
  * @method static LedgerTransferResult transfer(LedgerPayload $payload, string $sourceLedgerId, string $destinationLedgerId, string $ledgerType, ?PostingContext $context = null, ?int $expectedSourceVersion = null, ?int $expectedDestinationVersion = null)
+ * @method static LedgerTransferResult transferBetween(LedgerPayload $payload, string $sourceLedgerType, string $sourceLedgerId, string $destinationLedgerType, string $destinationLedgerId, ?PostingContext $context = null, ?int $expectedSourceVersion = null, ?int $expectedDestinationVersion = null)
  * @method static void overrideConnection(string $connection)
  * @method static void overrideLockTimeout(?int $timeout)
  *

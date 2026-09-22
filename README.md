@@ -114,6 +114,30 @@ $transaction = $abacus->post(
 );
 ```
 
+Ledgers may instead be resolved from Laravel's container at coordinator
+construction time:
+
+```php
+// config/abacus.php
+'ledgers' => [
+    VehicleEquityLedger::class,
+    DepartmentEquityLedger::class,
+],
+```
+
+Transfers may cross ledger types while retaining one atomic operation:
+
+```php
+$transfer = $abacus->transferBetween(
+    new EquityTransferred(amount: -50000),
+    VehicleEquityLedger::class,
+    $vehicle->id,
+    DepartmentEquityLedger::class,
+    $department->id,
+    $context,
+);
+```
+
 Use `postMany()` for several ordinary entries in one stream. Use
 `operation()` when one atomic write spans streams or combines posting,
 reversal, replacement, adjustment, or transfer actions:
@@ -149,6 +173,10 @@ Mappings may also be registered during application boot:
 $abacus->registerPayload(HourlyUseRecorded::TYPE, HourlyUseRecorded::class);
 ```
 
+A ledger may implement `HasPayloadTypes` to register its payload mappings when
+the ledger itself is registered. This keeps a domain's ledger, payload, and
+projector declarations together.
+
 Unregistered history is returned as `GenericPayload`. Financial payloads may
 implement `HasMoneyAmount`; Abacus then requires integer minor units through
 the contract and a three-letter uppercase currency code.
@@ -175,6 +203,30 @@ Ledgers may declare the same required projectors through `HasProjectors`.
 Required projectors run on the selected Abacus connection before commit. An
 exception rolls back the operation, its stream heads, and projection writes
 made through the supplied connection.
+
+### Locked Operation Policies
+
+Implement `OperationPolicy` on a ledger when a write rule must be evaluated
+after every affected stream has been locked. The policy receives an
+`OperationValidationContext` containing the operation kind, posting context,
+locked starting version, proposed payloads, current aggregates before and
+after, and the stream's existing plus proposed accounting entries. Matching
+idempotent retries return before policies run.
+
+Use a policy for authoritative stream rules such as temporal solvency. Keep
+request validation and rules involving entities outside the ledger in the
+application domain.
+
+### Money Balance Ledgers
+
+`MoneyBalanceLedger` is an optional base class for ledgers whose aggregate is
+the sum of signed minor-unit payload amounts. Payloads must implement both
+`HasMoneyAmount` and `OpposablePayload`. The base class validates currency,
+computes opposing entries, maintains `balance_minor`, and evaluates balance
+rules at every accounting boundary affected by a backdated operation.
+
+Subclasses identify accepted payloads and currency and may override
+`allowsNegativeBalance()` and `negativeBalanceException()` for their domain.
 
 ### Replayable Projections
 

@@ -94,6 +94,41 @@ it('transfers between streams in one semantic operation', function () {
         ->and(Abacus::getAggregate('cash-account', 'destination'))->toBe(['total' => 25]);
 });
 
+it('transfers atomically between different ledger types', function () {
+    Abacus::registerLedger(new SimpleLedger('reserve-account'));
+    Abacus::post('cash-account', 'shared-id', ledgerAmount(50), ledgerContext());
+
+    $transfer = Abacus::transferBetween(
+        ledgerAmount(-15, 'transfer'),
+        'cash-account',
+        'shared-id',
+        'reserve-account',
+        'shared-id',
+        ledgerContext()->withReason('fund reserve'),
+        expectedSourceVersion: 1,
+        expectedDestinationVersion: 0,
+    );
+
+    expect($transfer->operationId)->toBe($transfer->sourceTransaction->operationId)
+        ->and($transfer->operationId)->toBe($transfer->destinationTransaction->operationId)
+        ->and(LedgerOperation::query()->findOrFail($transfer->operationId)->kind)->toBe(OperationKind::Transfer)
+        ->and(Abacus::getAggregate('cash-account', 'shared-id'))->toBe(['total' => 35])
+        ->and(Abacus::getAggregate('reserve-account', 'shared-id'))->toBe(['total' => 15]);
+
+    assertDatabaseHas('ledger_transaction', [
+        'operation_id' => $transfer->operationId,
+        'ledger_type' => 'cash-account',
+        'ledger_id' => 'shared-id',
+        'operation_position' => 1,
+    ]);
+    assertDatabaseHas('ledger_transaction', [
+        'operation_id' => $transfer->operationId,
+        'ledger_type' => 'reserve-account',
+        'ledger_id' => 'shared-id',
+        'operation_position' => 2,
+    ]);
+});
+
 it('reverses every entry of an operation by operation id', function () {
     Abacus::post('cash-account', 'source', ledgerAmount(50), ledgerContext());
     Abacus::post('cash-account', 'destination', ledgerAmount(50), ledgerContext());

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Carbon\CarbonImmutable;
 use Faest\Abacus\Abacus as AbacusCoordinator;
 use Faest\Abacus\Data\GenericPayload;
 use Faest\Abacus\Data\PostingContext;
@@ -28,8 +29,7 @@ it('loads configured payload mappings into the registry shared by Abacus', funct
 });
 
 it('uses the central registry for aggregate reads and corrections', function () {
-    Abacus::registerLedger(new MoneyLedger)
-        ->registerPayload('test:money', MoneyPayload::class);
+    Abacus::registerLedger(new MoneyLedger);
 
     $original = Abacus::post(
         'money-account',
@@ -38,16 +38,49 @@ it('uses the central registry for aggregate reads and corrections', function () 
         typedPayloadContext(),
     );
 
-    expect(Abacus::getAggregate('money-account', 'one'))->toBe(['total' => 100]);
+    expect(Abacus::getAggregate('money-account', 'one'))->toBe(['balance_minor' => 100]);
 
     Abacus::reverse($original->id, typedPayloadContext());
 
-    expect(Abacus::getAggregate('money-account', 'one'))->toBe(['total' => 0]);
+    expect(Abacus::getAggregate('money-account', 'one'))->toBe(['balance_minor' => 0]);
+});
+
+it('registers configured ledgers and their declared payload types', function () {
+    config()->set('abacus.ledgers', [MoneyLedger::class]);
+
+    $abacus = app(AbacusCoordinator::class);
+    $transaction = $abacus->post(
+        'money-account',
+        'configured',
+        new MoneyPayload(25, 'USD'),
+        typedPayloadContext(),
+    );
+
+    expect($transaction->version)->toBe(1)
+        ->and($abacus->getAggregate('money-account', 'configured'))
+        ->toBe(['balance_minor' => 25]);
+});
+
+it('validates every affected accounting boundary inside an operation policy', function () {
+    Abacus::registerLedger(new MoneyLedger(allowNegative: false));
+
+    Abacus::post('money-account', 'one', new MoneyPayload(100, 'USD'), temporalMoneyContext('2026-01-01'));
+    Abacus::post('money-account', 'one', new MoneyPayload(-90, 'USD'), temporalMoneyContext('2026-03-01'));
+    Abacus::post('money-account', 'one', new MoneyPayload(90, 'USD'), temporalMoneyContext('2026-04-01'));
+
+    expect(fn () => Abacus::post(
+        'money-account',
+        'one',
+        new MoneyPayload(-50, 'USD'),
+        temporalMoneyContext('2026-01-15'),
+    ))->toThrow(InvalidArgumentException::class, 'cannot have a negative balance');
+
+    assertDatabaseCount('ledger_operation', 3);
+    assertDatabaseCount('ledger_transaction', 3);
 });
 
 it('rejects malformed money currencies without writing an operation', function (string $currency) {
-    Abacus::registerLedger(new MoneyLedger)
-        ->registerPayload('test:money', MoneyPayload::class);
+    Abacus::registerLedger(new MoneyLedger);
 
     expect(fn () => Abacus::post(
         'money-account',
@@ -98,4 +131,14 @@ it('rejects unsupported nested payload values before persistence', function () {
 function typedPayloadContext(): PostingContext
 {
     return PostingContext::forProcess('typed-payload-test', now(), now(), 'test typed payloads');
+}
+
+function temporalMoneyContext(string $accountingDate): PostingContext
+{
+    return PostingContext::forProcess(
+        'typed-payload-test',
+        CarbonImmutable::parse($accountingDate),
+        CarbonImmutable::parse($accountingDate),
+        'test temporal money policy',
+    );
 }

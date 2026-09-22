@@ -6,9 +6,11 @@ namespace Faest\Abacus\Tests\Fixtures;
 
 use Faest\Abacus\Contracts\DeserializablePayload;
 use Faest\Abacus\Contracts\HasMoneyAmount;
+use Faest\Abacus\Contracts\LedgerPayload;
+use Faest\Abacus\Contracts\OpposablePayload;
 use InvalidArgumentException;
 
-final readonly class MoneyPayload implements DeserializablePayload, HasMoneyAmount
+final readonly class MoneyPayload implements DeserializablePayload, HasMoneyAmount, OpposablePayload
 {
     public function __construct(
         private mixed $rawAmount,
@@ -36,6 +38,11 @@ final readonly class MoneyPayload implements DeserializablePayload, HasMoneyAmou
     public function currency(): string
     {
         return $this->rawCurrency;
+    }
+
+    public function opposing(): LedgerPayload
+    {
+        return new self(-$this->amount(), $this->currency());
     }
 
     /** @return array<string, mixed> */

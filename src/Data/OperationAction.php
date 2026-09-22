@@ -16,6 +16,7 @@ final readonly class OperationAction
         public ?string $ledgerId = null,
         public ?LedgerPayload $payload = null,
         public ?string $targetTransactionId = null,
+        public ?string $destinationLedgerType = null,
         public ?string $destinationLedgerId = null,
         public ?int $expectedVersion = null,
         public ?int $expectedDestinationVersion = null,
@@ -49,11 +50,32 @@ final readonly class OperationAction
         ?int $expectedSourceVersion = null,
         ?int $expectedDestinationVersion = null,
     ): self {
-        return new self(
-            OperationKind::Transfer,
+        return self::transferBetween(
             $ledgerType,
             $sourceLedgerId,
+            $ledgerType,
+            $destinationLedgerId,
             $payload,
+            $expectedSourceVersion,
+            $expectedDestinationVersion,
+        );
+    }
+
+    public static function transferBetween(
+        string $sourceLedgerType,
+        string $sourceLedgerId,
+        string $destinationLedgerType,
+        string $destinationLedgerId,
+        LedgerPayload $payload,
+        ?int $expectedSourceVersion = null,
+        ?int $expectedDestinationVersion = null,
+    ): self {
+        return new self(
+            OperationKind::Transfer,
+            $sourceLedgerType,
+            $sourceLedgerId,
+            $payload,
+            destinationLedgerType: $destinationLedgerType,
             destinationLedgerId: $destinationLedgerId,
             expectedVersion: $expectedSourceVersion,
             expectedDestinationVersion: $expectedDestinationVersion,

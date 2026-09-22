@@ -6,10 +6,12 @@ namespace Faest\Abacus;
 
 use Faest\Abacus\Console\Commands\RebuildProjectionCommand;
 use Faest\Abacus\Contracts\DeserializablePayload;
+use Faest\Abacus\Contracts\Ledger;
 use Faest\Abacus\Support\StorageConfiguration;
 use Illuminate\Contracts\Config\Repository;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
+use InvalidArgumentException;
 
 class AbacusServiceProvider extends ServiceProvider
 {
@@ -38,10 +40,27 @@ class AbacusServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(Abacus::class, function (Application $app) {
-            return new Abacus(
+            $abacus = new Abacus(
                 $app->make(PayloadRegistry::class),
                 $app->make(StorageConfiguration::class),
             );
+
+            /** @var mixed $configuredLedgers */
+            $configuredLedgers = $app->make(Repository::class)->get('abacus.ledgers', []);
+
+            if (! is_array($configuredLedgers)) {
+                throw new InvalidArgumentException('Configured Abacus ledgers must be an array.');
+            }
+
+            foreach ($configuredLedgers as $ledgerClass) {
+                if (! is_string($ledgerClass) || ! is_subclass_of($ledgerClass, Ledger::class)) {
+                    throw new InvalidArgumentException('Configured Abacus ledgers must implement Ledger.');
+                }
+
+                $abacus->registerLedger($app->make($ledgerClass));
+            }
+
+            return $abacus;
         });
     }
 
