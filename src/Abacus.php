@@ -302,7 +302,7 @@ final class Abacus
             ->with('transactions')
             ->orderBy(
                 $this->ledgerTranQuery()
-                    ->selectRaw('MAX(stream_version)')
+                    ->select(DB::raw('MAX(stream_version)'))
                     ->whereColumn('operation_id', "{$operationTable}.id")
                     ->where('ledger_type', $canonicalType)
                     ->where('ledger_id', $ledgerId),
@@ -694,7 +694,18 @@ final class Abacus
     /** @return Builder<LedgerTransaction> */
     public function ledgerTranQuery(): Builder
     {
-        return LedgerTransaction::on($this->connectionName());
+        return LedgerTransaction::on($this->connectionName())
+            ->select([
+                'id', 'operation_id', 'operation_position',
+                'ledger_type', 'ledger_id', 'stream_version',
+                'payload_type', 'reason',
+                'reverses_transaction_id',
+                'adjusts_transaction_id',
+                'replaces_transaction_id',
+                'correlation_id',
+                'event_date', 'system_date', 'accounting_date',
+                'actor', 'payload',
+            ]);
     }
 
     /** @return Builder<LedgerOperation> */
@@ -1056,7 +1067,9 @@ final class Abacus
         $reversedTargets = [];
 
         foreach ($corrections as $correction) {
-            $original = $correction['original']->fresh();
+            $original = $this->ledgerTranQuery()
+                ->useWritePdo()
+                ->find($correction['original']->id);
 
             if (! $original) {
                 throw new InvalidCorrectionException(

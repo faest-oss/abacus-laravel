@@ -18,6 +18,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Laravel\Prompts\Prompt;
 
 beforeEach(function () {
     Abacus::registerLedger(new SimpleLedger);
@@ -141,6 +142,8 @@ it('validates rebuild command arguments', function (array $arguments, string $me
 it('requires confirmation in production', function () {
     $environment = $this->app->environment();
     $this->app->detectEnvironment(fn (): string => 'production');
+    // Production disables Laravel's automatic test prompt fallback.
+    Prompt::fallbackWhen(true);
 
     try {
         Abacus::post('cash-account', 'cash', replayAmount(10), replayContext());

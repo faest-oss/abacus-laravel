@@ -41,7 +41,7 @@ it('uses a configured connection, schema, and table names throughout the package
         expect($abacus->createAggregateSnapshot('snapshot-account', 'configured-stream'))->toBe(2)
             ->and($abacus->streamVersion('snapshot-account', 'configured-stream'))->toBe(2)
             ->and($abacus->getAggregate('snapshot-account', 'configured-stream'))->toBe(['total' => 0])
-            ->and($abacus->operationsForStream('snapshot-account', 'configured-stream')->count())->toBe(2)
+            ->and($abacus->operationsForStream('snapshot-account', 'configured-stream')->get()->count())->toBe(2)
             ->and($abacus->transactionsForStream(
                 'snapshot-account',
                 'configured-stream',
